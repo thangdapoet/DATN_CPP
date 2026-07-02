@@ -1,28 +1,37 @@
 #include <Arduino.h>
+#include <SPI.h>
 #include <ESP32Servo.h>
 #include <MFRC522.h>
 #include <Wire.h>
 #include <Keypad.h>
 #include <LiquidCrystal_I2C.h>
 #include <Preferences.h>
+#include <esp_sleep.h>
+#include <driver/rtc_io.h>
 #include <WiFi.h>
-#include <HTTPClient.h>
+#include <PubSubClient.h>
 
-// ---------------- Config ----------------
-const char *ssid = "THANGDAPOET";
-const char *password = "15112004";
-bool wifiConnected = false;
-
-// IP of the esp32-cam (change to your cam's IP after it's connected)
-const char* CAM_IP = "192.168.196.57"; // <-- set this to ESP32-CAM IP
-
-// ---------------- Prototypes ----------------
 void showMainPrompt();
 void adminMenu();
-void notifyCamAsync(bool allowed, const String &uid); // async notify
-void wifiTask(void *pv);
+void goToSleep();
+void handleWiFiAndMQTT(); 
+void sendMQTTLog(String message);
+void processPassword();
+void triggerFaceAuth();
+void keypadEvent(KeypadEvent key);
+void mqttCallback(char* topic, byte* payload, unsigned int length);
 
-// ----------------= Config pins & constants =----------------
+const char* ssid = "Thang";         
+const char* password = "15112004";        
+const char* mqtt_server = "broker.emqx.io";    
+const int mqtt_port = 1883;
+const char* mqtt_topic_log = "quangthang/smartlock/log"; 
+const char* mqtt_topic_cmd = "quangthang/smartlock/cmd"; 
+
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+unsigned long lastReconnectAttempt = 0;
+
 const byte ROWS = 4, COLS = 4;
 char keysArr[ROWS][COLS] = {
   {'1','2','3','A'}, {'4','5','6','B'},
@@ -37,44 +46,52 @@ LiquidCrystal_I2C lcd(0x27, 20, 4);
 // RFID
 const int RFID_SS = 2;
 const int RFID_RST = 4;
-MFRC522 rfid(RFID_SS, RFID_RST);//sda/ss 2; mosi 23, miso 19, sck 18
+MFRC522 rfid(RFID_SS, RFID_RST);
+MFRC522::MIFARE_Key rfidKey;
 
-// Servo 360° (microseconds control)
+byte myCustomKey[6] = {0x15, 0x11, 0x20, 0x04, 0x0A, 0x0B}; 
+byte secretData[16] = {'Q','U','A','N','G','T','H','A','N','G','_','S','E','C','U','R'};
+const byte SECURE_BLOCK = 4;
+
 Servo doorServo;
 const int SERVO_PIN = 15;
-int SERVO_NEUTRAL = 1500; // try adjust if servo drifts
+int SERVO_NEUTRAL = 1500; 
 const int SERVO_OPEN = 1700;
 const int SERVO_CLOSE = 1310;
 const int SERVO_DELAY = 800;
 
-// Buzzer - GPIO17
+// Buzzer 
 const int BUZZ_PIN = 17;
 const int BUZZ_CH = 6;
 const int BUZZ_FREQ = 2000;
 const int BUZZ_RES = 8;
 
-// Admin UID (hard-coded)
 const byte ADMIN_UID[4] = {0xAC, 0x64, 0x91, 0x05};
 
-// Preferences
 Preferences prefs;
 const char *PREF_NS = "rfid_store";
 const int MAX_CARDS = 60;
 
-// State
 String inputBuf = "";
 String storedPassword;
 int wrongCount = 0;
+int wrongCardCount = 0;   // THÊM: Đếm sai thẻ
+bool rfidLocked = false;
 bool alarmActive = false;
-unsigned long alarmEnd = 0;
-const unsigned long ALARM_MS = 15000UL;
+bool alarmLcdPrinted = false; 
 bool showingMain = false;
 
-// WiFi reconnect interval (not used by loop anymore)
-unsigned long lastWifiCheck = 0;
-const unsigned long WIFI_CHECK_INTERVAL = 5000UL; // kept for compatibility
+unsigned long lastActivity = 0;
+const unsigned long SLEEP_TIMEOUT = 15000UL; 
+bool currentWiFiState = false; 
+unsigned long lastWiFiAttempt = 0;
 
-// ---------------- Utility functions ----------------
+// BIẾN CHO TÍNH NĂNG NHẬN DIỆN KHUÔN MẶT
+bool isHoldingHash = false;
+bool isWaitingFaceAuth = false;
+int faceAuthResult = 0; 
+unsigned long faceAuthTimeout = 0;
+
 void buzz(int duty, unsigned long ms) {
   ledcWrite(BUZZ_CH, duty);
   delay(ms);
@@ -97,13 +114,74 @@ bool isAdmin(const MFRC522::Uid &u) {
   return true;
 }
 
-// ---------------- Preferences helpers ----------------
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String msg = "";
+  for (int i = 0; i < length; i++) {
+    msg += (char)payload[i];
+  }
+  Serial.print("🔔 [MQTT NHẬN LỆNH] "); Serial.print(topic); Serial.print(": "); Serial.println(msg);
+
+  if (String(topic) == String(mqtt_topic_cmd)) {
+    if (msg == "FACE_SUCCESS") {
+      faceAuthResult = 1;
+    } else if (msg == "FACE_DENIED") {
+      faceAuthResult = -1;
+    }
+  }
+}
+
+void handleWiFiAndMQTT() {
+  bool isConnected = (WiFi.status() == WL_CONNECTED);
+  
+  if (isConnected != currentWiFiState) {
+    currentWiFiState = isConnected;
+    if (showingMain && !alarmActive && !isWaitingFaceAuth) {
+      lcd.setCursor(0,3);
+      if (currentWiFiState) {
+        lcd.print("WIFI: CONNECTED   ");
+      } else {
+        lcd.print("WIFI: DISCONNECTED");
+      }
+    }
+  }
+
+  if (!isConnected) {
+    unsigned long now = millis();
+    if (now - lastWiFiAttempt > 5000) { 
+      Serial.println("🔄 Đang kết nối WiFi...");
+      WiFi.disconnect();
+      WiFi.begin(ssid, password);
+      lastWiFiAttempt = now;
+    }
+  } 
+  else {
+    if (!mqttClient.connected()) {
+      unsigned long now = millis();
+      if (now - lastReconnectAttempt > 5000) {
+        Serial.println("🌐 Đã có WiFi! Đang kết nối MQTT Server...");
+        lastReconnectAttempt = now;
+        String clientId = "ESP32_Lock_" + String(random(0xffff), HEX);
+        if (mqttClient.connect(clientId.c_str())) {
+          Serial.println("✅ Kết nối MQTT THÀNH CÔNG!");
+          lastReconnectAttempt = 0;
+          mqttClient.subscribe(mqtt_topic_cmd);
+        }
+      }
+    } else {
+      mqttClient.loop(); 
+    }
+  }
+}
+
+void sendMQTTLog(String message) {
+  if (mqttClient.connected()) {
+    mqttClient.publish(mqtt_topic_log, message.c_str());
+  }
+}
+
 String loadPassword() {
   String pw = prefs.getString("pw", "");
-  if (pw == "") {
-    pw = "1234";
-    prefs.putString("pw", pw);
-  }
+  if (pw == "") { pw = "1234"; prefs.putString("pw", pw); }
   return pw;
 }
 void savePassword(const String &pw){ prefs.putString("pw", pw); }
@@ -112,10 +190,10 @@ String cardAt(int i){ return prefs.getString(("uid"+String(i)).c_str(), ""); }
 void setCard(int i, const String &uid){ prefs.putString(("uid"+String(i)).c_str(), uid); }
 void setCount(int n){ prefs.putInt("n", n); }
 
-bool addCard(const String &uidIn){
+bool addCardToMem(const String &uidIn){
   String uid = uidIn; uid.toUpperCase();
   int n = cardCount();
-  for (int i=0;i<n;i++) if (cardAt(i) == uid) return false;
+  for (int i=0; i<n; i++) if (cardAt(i) == uid) return false;
   if (n >= MAX_CARDS) return false;
   setCard(n, uid); setCount(n+1); return true;
 }
@@ -124,164 +202,160 @@ bool removeCard(const String &uidIn){
   String uid = uidIn; uid.toUpperCase();
   int n = cardCount();
   int found = -1;
-  for (int i=0;i<n;i++) if (cardAt(i) == uid) { found = i; break; }
+  for (int i=0; i<n; i++) if (cardAt(i) == uid) { found = i; break; }
   if (found == -1) return false;
-  for (int i=found;i<n-1;i++) setCard(i, cardAt(i+1));
+  for (int i=found; i<n-1; i++) setCard(i, cardAt(i+1));
   prefs.remove(("uid"+String(n-1)).c_str());
   setCount(n-1);
   return true;
 }
 
-bool isAllowed(const String &uidIn){
+bool isAllowedInMem(const String &uidIn){
   String uid = uidIn; uid.toUpperCase();
   int n = cardCount();
-  for (int i=0;i<n;i++) if (cardAt(i) == uid) return true;
+  for (int i=0; i<n; i++) if (cardAt(i) == uid) return true;
   return false;
 }
 
-// Wait for a single card scan (up to timeoutMs), return true & uid if found
-bool waitForCard(String &outUid, unsigned long timeoutMs = 15000) {
+int waitForCardOrCancel(String &outUid, unsigned long timeoutMs = 15000) {
   unsigned long t0 = millis();
   while (millis() - t0 < timeoutMs) {
+    handleWiFiAndMQTT(); 
+    char k = keypad.getKey();
+    if (k) {
+      lastActivity = millis(); 
+      if (k == 'C' || k == 'c' || k == 'D') return -1; 
+    }
+
     if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
       outUid = uidToHex(rfid.uid);
-      rfid.PICC_HaltA();
-      return true;
+      return 1; 
     }
     delay(30);
   }
-  return false;
+  return 0; 
 }
 
-// ---------------- WiFi helpers ----------------
-void ensureWiFiConnected() {
-  // kept for compatibility but NOT used in loop anymore
-  if (WiFi.status() == WL_CONNECTED) {
-    if (!wifiConnected) {
-      wifiConnected = true;
-      Serial.println("WiFi connected! IP: " + WiFi.localIP().toString());
-    }
-    return;
-  }
-  // attempt reconnect (blocking short)
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting WiFi");
-  unsigned long startAttempt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 1500) { // short try
-    delay(200);
-    Serial.print(".");
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    wifiConnected = true;
-    Serial.println("\nWiFi connected! IP: " + WiFi.localIP().toString());
-  } else {
-    wifiConnected = false;
-    Serial.println("\nWiFi disconnected!");
-  }
+bool writeSecureBlock() {
+  MFRC522::StatusCode status;
+  MFRC522::MIFARE_Key defaultKey;
+  for (byte i = 0; i < 6; i++) defaultKey.keyByte[i] = 0xFF; 
+
+  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, 7, &defaultKey, &(rfid.uid));
+  if (status != MFRC522::STATUS_OK) return false;
+
+  byte sectorTrailerData[16] = {
+    myCustomKey[0], myCustomKey[1], myCustomKey[2], myCustomKey[3], myCustomKey[4], myCustomKey[5],
+    0xFF, 0x07, 0x80, 0x69,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+  };
+
+  status = rfid.MIFARE_Write(7, sectorTrailerData, 16);
+  if (status != MFRC522::STATUS_OK) return false;
+
+  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, SECURE_BLOCK, &rfidKey, &(rfid.uid));
+  if (status != MFRC522::STATUS_OK) return false;
+
+  status = rfid.MIFARE_Write(SECURE_BLOCK, secretData, 16);
+  if (status != MFRC522::STATUS_OK) return false;
+
+  return true;
 }
 
-// ---------------- Async notify (FreeRTOS task) ----------------
-struct NotifyParams {
-  bool allowed;
-  char uid[33]; // up to 32 chars + null
-};
-
-void notifyTask(void *pvParameters) {
-  NotifyParams *p = (NotifyParams*)pvParameters;
-  if (!p) {
-    vTaskDelete(NULL);
-    return;
+bool verifySecureBlock() {
+  MFRC522::StatusCode status;
+  byte buffer[18];
+  byte size = sizeof(buffer);
+  
+  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, SECURE_BLOCK, &rfidKey, &(rfid.uid));
+  if (status != MFRC522::STATUS_OK) return false;
+  
+  status = rfid.MIFARE_Read(SECURE_BLOCK, buffer, &size);
+  if (status != MFRC522::STATUS_OK) return false;
+  
+  for (byte i = 0; i < 16; i++) {
+    if (buffer[i] != secretData[i]) return false;
   }
-
-  // ensure WiFi connected (try quick reconnect if needed)
-  if (WiFi.status() != WL_CONNECTED) {
-    WiFi.begin(ssid, password);
-    unsigned long t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 3000) {
-      vTaskDelay(200 / portTICK_PERIOD_MS);
-    }
-  }
-
-  String statusStr = p->allowed ? "ok" : "bad";
-  String url = String("http://") + CAM_IP + "/notify?status=" + statusStr;
-  if (p->allowed && strlen(p->uid) > 0) {
-    url += "&id=" + String(p->uid);
-  }
-
-  HTTPClient http;
-  http.setConnectTimeout(1500); // 1.5s
-  http.begin(url);
-  int code = http.POST("");
-  if (code > 0) {
-    Serial.printf("Notify (async) %s,%s -> %d\n", statusStr.c_str(), p->uid, code);
-  } else {
-    Serial.printf("Notify (async) failed %s,%s err=%d\n", statusStr.c_str(), p->uid, code);
-  }
-  http.end();
-
-  free(p);
-  vTaskDelete(NULL);
+  return true;
 }
 
-void notifyCamAsync(bool allowed, const String &uid) {
-  NotifyParams *p = (NotifyParams*)malloc(sizeof(NotifyParams));
-  if (!p) {
-    Serial.println("notifyCamAsync: malloc failed");
-    return;
-  }
-  p->allowed = allowed;
-  memset(p->uid, 0, sizeof(p->uid));
-  if (uid.length() > 0) {
-    String tmp = uid;
-    tmp.toUpperCase();
-    tmp = tmp.substring(0, 32);
-    tmp.toCharArray(p->uid, sizeof(p->uid));
+bool resetSecureBlock() {
+  MFRC522::StatusCode status;
+
+  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, 7, &rfidKey, &(rfid.uid));
+  if (status != MFRC522::STATUS_OK) return false;
+
+  byte factoryTrailer[16] = {
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0x07, 0x80, 0x69,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+  };
+
+  status = rfid.MIFARE_Write(7, factoryTrailer, 16);
+  if (status != MFRC522::STATUS_OK) return false;
+
+  MFRC522::MIFARE_Key defaultKey;
+  for (byte i = 0; i < 6; i++) defaultKey.keyByte[i] = 0xFF;
+
+  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, SECURE_BLOCK, &defaultKey, &(rfid.uid));
+  if (status == MFRC522::STATUS_OK) {
+    byte emptyBlock[16] = {0}; 
+    rfid.MIFARE_Write(SECURE_BLOCK, emptyBlock, 16); 
   }
 
-  BaseType_t r = xTaskCreatePinnedToCore(
-    notifyTask,         // task function
-    "notifyTask",       // name
-    4096,               // stack size
-    p,                  // param
-    1,                  // priority
-    NULL,               // task handle
-    1                   // core
-  );
-
-  if (r != pdPASS) {
-    Serial.println("notifyCamAsync: xTaskCreate failed");
-    free(p);
-  }
+  return true;
 }
 
-// Only writes WiFi status line (line 4). Should be called only when showingMain==true
-void showWiFiStatus() {
-  lcd.setCursor(0, 3);
-  if (wifiConnected) {
-    lcd.print("WiFi: Connected   ");
-  } else {
-    lcd.print("WiFi: Disconnected");
-  }
+void goToSleep() {
+  Serial.println("Going to Deep Sleep...");
+  WiFi.disconnect();
+  
+  lcd.clear();
+  lcd.noBacklight();
+  rfid.PCD_AntennaOff();
+
+  rtc_gpio_init(GPIO_NUM_33); rtc_gpio_set_direction(GPIO_NUM_33, RTC_GPIO_MODE_INPUT_ONLY);
+  rtc_gpio_init(GPIO_NUM_25); rtc_gpio_set_direction(GPIO_NUM_25, RTC_GPIO_MODE_INPUT_ONLY);
+  rtc_gpio_init(GPIO_NUM_26); rtc_gpio_set_direction(GPIO_NUM_26, RTC_GPIO_MODE_INPUT_ONLY);
+
+  rtc_gpio_init(GPIO_NUM_32);
+  rtc_gpio_set_direction(GPIO_NUM_32, RTC_GPIO_MODE_OUTPUT_ONLY);
+  rtc_gpio_set_level(GPIO_NUM_32, 0);
+
+  rtc_gpio_init(GPIO_NUM_27);
+  rtc_gpio_set_direction(GPIO_NUM_27, RTC_GPIO_MODE_INPUT_ONLY);
+  rtc_gpio_pullup_en(GPIO_NUM_27);
+  rtc_gpio_pulldown_dis(GPIO_NUM_27);
+
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_27, 0); 
+  
+  delay(100);
+  esp_deep_sleep_start();
 }
 
-// ---------------- UI ----------------
 void showMainPrompt() {
   showingMain = true;
   lcd.clear();
   lcd.setCursor(0,0);
-  lcd.print("Quet the / Nhap pass");
+  lcd.print("Quet the/Nhap pass");
   lcd.setCursor(0,1);
-  lcd.print("# = Enter * = Del");
+  lcd.print("*:DEL #: ENTER");
+  
   lcd.setCursor(0,2);
   String disp = "";
-  for (size_t i=0;i<inputBuf.length();i++) disp += '*';
+  for (size_t i=0; i<inputBuf.length(); i++) disp += '*';
   lcd.print(disp);
-  showWiFiStatus();
+
+  lcd.setCursor(0,3);
+  if (WiFi.status() == WL_CONNECTED) {
+    lcd.print("WIFI: CONNECTED   ");
+  } else {
+    lcd.print("WIFI: DISCONNECTED");
+  }
 }
 
 void leaveMainUI() { showingMain = false; }
 
-// ---------------- Door servo routine ----------------
 void performDoorCycle() {
   leaveMainUI();
   lcd.clear();
@@ -290,12 +364,23 @@ void performDoorCycle() {
   doorServo.writeMicroseconds(SERVO_OPEN);
   delay(SERVO_DELAY);
   doorServo.writeMicroseconds(SERVO_NEUTRAL);
-  delay(3000);
+  
+  for (int i = 5; i > 0; i--) {
+    lcd.setCursor(0, 1);
+    lcd.print("Close in: ");
+    lcd.print(i);
+    lcd.print("s  ");
+    delay(1000);
+  }
+
+  lcd.clear();
   lcd.setCursor(0,0);
   lcd.print("Closing door...");
   doorServo.writeMicroseconds(SERVO_CLOSE);
   delay(SERVO_DELAY);
   doorServo.writeMicroseconds(SERVO_NEUTRAL);
+  
+  lastActivity = millis(); 
   showMainPrompt();
 }
 
@@ -303,306 +388,470 @@ void openDoor(const String &who, bool admin=false) {
   leaveMainUI();
   lcd.clear();
   lcd.setCursor(0,0);
-  if (admin) { lcd.print("Welcome Admin!!"); buzz(200,200); }
-  else { lcd.print("Welcome !!"); buzz(120,150); }
-  lcd.setCursor(0,1);
-  lcd.print(who);
-  performDoorCycle();
+  
+  if (admin) { 
+    lcd.print("Welcome THANG HUYNH"); 
+    buzz(200,200); 
+    delay(1000);
+  } else { 
+    lcd.print("Welcome"); 
+    if (who != "") {
+      lcd.setCursor(0,1);
+      lcd.print(who); 
+    }
+    buzz(120,150); 
+    delay(1000); 
+    performDoorCycle();
+  }
 }
 
-// ---------------- Wrong / Alarm handlers ----------------
 void wrongNotify() {
   leaveMainUI();
   lcd.clear();
   lcd.setCursor(0,0);
   lcd.print("LOCK!!");
-  buzz(180,200);
-  delay(150);
-  buzz(180,200);
-  delay(400);
+  buzz(180,200); delay(150); buzz(180,200); delay(400);
+  
+  lastActivity = millis(); 
   showMainPrompt();
 }
 
-void startAlarm() {
-  alarmActive = true;
-  alarmEnd = millis() + ALARM_MS;
+void startAlarm() { 
+  alarmActive = true; 
+  alarmLcdPrinted = false; 
+  sendMQTTLog("PASS_LOCKED");
 }
 
-void stopAlarm() {
-  alarmActive = false;
-  ledcWrite(BUZZ_CH, 0);
+void stopAlarm() { 
+  alarmActive = false; 
+  alarmLcdPrinted = false;
+  ledcWrite(BUZZ_CH, 0); 
+  lastActivity = millis(); 
 }
 
-// ---------------- Admin menu ----------------
+void processPassword() {
+  bool passOk = (inputBuf == storedPassword);
+if (inputBuf == "041115") { 
+    buzz(200, 100); delay(100); buzz(200, 100); // Kêu 2 tiếng tít tít xác nhận
+    delay(500);
+    ESP.restart(); //restart
+  }
+  if (passOk) {
+    wrongCount = 0;
+    wrongCardCount = 0;  // THÊM: Reset đếm thẻ
+    rfidLocked = false;  // THÊM: Mở khóa lại chức năng quẹt thẻ
+    openDoor("PASSWORD", false);      
+  } else {
+    wrongCount++;
+    if (wrongCount >= 5) { 
+      startAlarm();
+      wrongCount = 0;
+    } else {
+      wrongNotify();
+    }
+  }
+  inputBuf = "";
+  showMainPrompt();
+}
+
+void triggerFaceAuth() {
+  leaveMainUI();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Authenticating...");
+  lcd.setCursor(0, 1);
+  lcd.print("Please wait...");
+  
+  buzz(100, 150); delay(100); buzz(100, 150);
+
+  sendMQTTLog("REQUEST_FACE_AUTH: HOLD"); 
+  
+  isWaitingFaceAuth = true;
+  faceAuthResult = 0;
+  faceAuthTimeout = millis() + 15000; 
+}
+
+void keypadEvent(KeypadEvent key) {
+  lastActivity = millis();
+  
+  if (key == '#') {
+    switch (keypad.getState()) {
+      case HOLD:
+        isHoldingHash = true;
+        if (!alarmActive) { 
+          triggerFaceAuth();
+        }
+        break;
+      case RELEASED:
+        if (!isHoldingHash && !isWaitingFaceAuth && !alarmActive) {
+          processPassword(); 
+        }
+        isHoldingHash = false;
+        break;
+      case IDLE:
+      case PRESSED:
+        break;
+    }
+  }
+}
+
 void adminMenu() {
   leaveMainUI();
   lcd.clear();
   lcd.setCursor(0,0);
   lcd.print("ADMIN MODE");
   lcd.setCursor(0,1);
-  lcd.print("1:CHG 2:DEL 3:ADD C:Exit");
+  lcd.print("1:CHG 2:DEL 3:ADD");
+  lcd.setCursor(0,2);
+  lcd.print("C:Exit");
+  
   unsigned long start = millis();
-  while (millis() - start < 15000UL) {
+  while (millis() - start < 15000UL) { 
+    handleWiFiAndMQTT();
     char k = keypad.getKey();
     if (!k) { delay(30); continue; }
+    
+    lastActivity = millis(); 
+    
     if (k == 'C' || k == 'c' || k == 'D') {
       lcd.clear(); lcd.setCursor(0,0); lcd.print("Exit Admin");
       delay(300); showMainPrompt(); return;
     }
+    
     if (k == '1') {
       lcd.clear(); lcd.setCursor(0,0); lcd.print("CHANGE PASS");
-      lcd.setCursor(0,1); lcd.print("Enter new pass:");
+      lcd.setCursor(0,1); lcd.print("New pass:");
+      lcd.setCursor(0,3); lcd.print("*:Del C:Exit #:Ent");
+      
       String newPw = "";
       unsigned long t0 = millis();
       while (millis() - t0 < 15000UL) {
+        handleWiFiAndMQTT();
         char kk = keypad.getKey();
         if (kk) {
-          t0 = millis();
-          if (kk == '#') {
+          t0 = millis(); 
+          lastActivity = millis(); 
+          
+          if (kk == 'C' || kk == 'c' || kk == 'D') {
+            lcd.clear(); lcd.setCursor(0,0); lcd.print("Canceled"); 
+            delay(600); showMainPrompt(); return;
+          }
+          
+          if (kk == '#') { 
             if (newPw.length() > 0) {
-              savePassword(newPw);
-              storedPassword = newPw;
-              lcd.clear(); lcd.setCursor(0,0); lcd.print("SAVED");
-              buzz(160,150);
-              delay(800);
-              showMainPrompt();
-              return;
+              savePassword(newPw); storedPassword = newPw;
+              sendMQTTLog("ADMIN_CHANGED_PASSWORD");
+              lcd.clear(); lcd.setCursor(0,0); lcd.print("SAVED PWD!");
+              buzz(160,150); delay(800); showMainPrompt(); return;
+            } else {
+              lcd.clear(); lcd.setCursor(0,0); lcd.print("Pass empty!"); 
+              delay(800); showMainPrompt(); return;
             }
-          } else if (kk == '*') {
+          } else if (kk == '*') { 
             if (newPw.length()) newPw.remove(newPw.length()-1);
-          } else {
+          } else { 
             if (newPw.length() < 16) newPw += kk;
           }
+          
           lcd.setCursor(0,2);
-          String ds = "";
-          for (size_t i=0;i<newPw.length();i++) ds += '*';
-          lcd.print("                ");
-          lcd.setCursor(0,2);
-          lcd.print(ds);
+          String ds = ""; for (size_t i=0; i<newPw.length(); i++) ds += '*';
+          lcd.print("                "); lcd.setCursor(0,2); lcd.print(ds);
         }
         delay(30);
       }
-      // timeout
-      if (newPw.length() > 0) {
-        savePassword(newPw);
-        storedPassword = newPw;
-        lcd.clear(); lcd.setCursor(0,0); lcd.print("SAVED");
-        buzz(160,150);
-        delay(800);
-        showMainPrompt(); return;
-      } else {
-        lcd.clear(); lcd.setCursor(0,0); lcd.print("No input"); delay(600); showMainPrompt(); return;
-      }
+      lcd.clear(); lcd.setCursor(0,0); lcd.print("Timeout! Cancel"); delay(800); showMainPrompt(); return;
     }
+    
     if (k == '2') {
-      lcd.clear(); lcd.setCursor(0,0); lcd.print("DEL TAG: Scan");
+      lcd.clear(); 
+      lcd.setCursor(0,0); lcd.print("DEL TAG: Scan");
+      lcd.setCursor(0,1); lcd.print("C: Cancel");
+      
       String uid;
-      if (waitForCard(uid, 15000UL)) {
+      int status = waitForCardOrCancel(uid, 15000UL); 
+      
+      if (status == 1) { 
         uid.toUpperCase();
-        if (removeCard(uid)) {
-          lcd.clear(); lcd.setCursor(0,0); lcd.print("Deleted:"); lcd.setCursor(0,1); lcd.print(uid); buzz(160,120);
+        if (resetSecureBlock()) {
+          if (removeCard(uid)) {
+            sendMQTTLog("ADMIN_DELETED_CARD: " + uid);
+            lcd.clear(); lcd.setCursor(0,0); lcd.print("DELETED"); buzz(160,120);
+          } else {
+            lcd.clear(); lcd.setCursor(0,0); lcd.print("Not found"); buzz(60,200);
+          }
         } else {
-          lcd.clear(); lcd.setCursor(0,0); lcd.print("Not found"); buzz(60,200);
+          lcd.clear(); lcd.setCursor(0,0); lcd.print("Reset Key Loi!");
+          lcd.setCursor(0,1); lcd.print("The khong khop Key"); buzz(60,200);
         }
+        rfid.PICC_HaltA(); rfid.PCD_StopCrypto1(); 
         delay(900); showMainPrompt(); return;
-      } else {
+      } 
+      else if (status == -1) { 
+        lcd.clear(); lcd.setCursor(0,0); lcd.print("Canceled"); delay(600); showMainPrompt(); return;
+      } 
+      else { 
         lcd.clear(); lcd.setCursor(0,0); lcd.print("No card"); delay(700); showMainPrompt(); return;
       }
     }
+    
     if (k == '3') {
-      lcd.clear(); lcd.setCursor(0,0); lcd.print("ADD TAG: Scan");
+      lcd.clear(); 
+      lcd.setCursor(0,0); lcd.print("ADD TAG: Scan");
+      lcd.setCursor(0,1); lcd.print("C: Cancel");
+      
       String uid;
-      if (waitForCard(uid, 15000UL)) {
+      int status = waitForCardOrCancel(uid, 15000UL); 
+      
+      if (status == 1) { 
         uid.toUpperCase();
-        if (addCard(uid)) { lcd.clear(); lcd.setCursor(0,0); lcd.print("Added:"); lcd.setCursor(0,1); lcd.print(uid); buzz(160,120); }
-        else { lcd.clear(); lcd.setCursor(0,0); lcd.print("Exists/Full"); buzz(60,200); }
+
+        if (isAllowedInMem(uid)) {
+          lcd.clear();
+          lcd.setCursor(0,0); lcd.print("Already exists"); 
+          buzz(60,200);
+          rfid.PICC_HaltA(); rfid.PCD_StopCrypto1(); 
+          delay(1500); showMainPrompt(); return;
+        }
+
+        if (writeSecureBlock()) {
+          if (addCardToMem(uid)) {
+            lcd.clear(); 
+            lcd.setCursor(0, 0); 
+            lcd.print("Look at Camera!"); 
+            
+            // Vòng lặp đếm ngược động 3 giây
+            for (int i = 3; i > 0; i--) {
+              lcd.setCursor(0, 1); 
+              lcd.print("Capturing in "); lcd.print(i); lcd.print("s "); // Thêm khoảng trắng để xóa số cũ nếu có
+              delay(1000);     // Đợi 1 giây cho mỗi số
+            }
+            
+            // Chụp xong mới gửi MQTT để Python bắt lấy khung hình
+            sendMQTTLog("ADMIN_ADDED_CARD: " + uid);
+            
+            lcd.clear(); lcd.setCursor(0, 0);  lcd.print("Added:");  lcd.setCursor(0, 1); lcd.print(uid); 
+          } else { 
+            lcd.clear(); lcd.setCursor(0, 0);  lcd.print("Exists/Full"); 
+            buzz(60, 200); // Vẫn giữ còi báo lỗi ngắn để biết thẻ đã đầy/trùng
+          }
+        } else {
+          lcd.clear(); lcd.setCursor(0,0); lcd.print("Loi Ghi Sector!");
+          lcd.setCursor(0,1); lcd.print("The da duoc khoa"); buzz(60,200);
+        }
+        rfid.PICC_HaltA(); rfid.PCD_StopCrypto1(); 
         delay(900); showMainPrompt(); return;
-      } else {
+      } 
+      else if (status == -1) { 
+        lcd.clear(); lcd.setCursor(0,0); lcd.print("Canceled"); delay(600); showMainPrompt(); return;
+      } 
+      else { 
         lcd.clear(); lcd.setCursor(0,0); lcd.print("No card"); delay(700); showMainPrompt(); return;
       }
     }
   }
-  lcd.clear(); lcd.setCursor(0,0); lcd.print("Admin timeout"); delay(600); showMainPrompt(); return;
+  lcd.clear(); lcd.setCursor(0,0); lcd.print("Exit admin"); delay(600); showMainPrompt(); return;
 }
 
-// ---------------- Setup & Loop ----------------
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
   delay(200);
 
-  // lcd init
-  Wire.begin(21, 22); // SDA, SCL
+  WiFi.mode(WIFI_STA);
+  mqttClient.setServer(mqtt_server, mqtt_port);
+  mqttClient.setCallback(mqttCallback); 
+
+  keypad.setHoldTime(3000); 
+  keypad.addEventListener(keypadEvent); 
+
+  rtc_gpio_deinit(GPIO_NUM_27);
+  rtc_gpio_deinit(GPIO_NUM_32);
+  rtc_gpio_deinit(GPIO_NUM_33);
+  rtc_gpio_deinit(GPIO_NUM_25);
+  rtc_gpio_deinit(GPIO_NUM_26);
+
+  Wire.begin(21, 22);
   lcd.init();
   lcd.backlight();
   lcd.clear();
 
-  // initial main prompt (so user sees UI ASAP)
-  showMainPrompt();
-
-  // Start WiFi task (handles reconnect non-blocking)
-  xTaskCreatePinnedToCore(
-    wifiTask,
-    "wifiTask",
-    4096,
-    NULL,
-    1,
-    NULL,
-    0 // run on core 0
-  );
-
-  // buzzer pwm setup
   ledcSetup(BUZZ_CH, BUZZ_FREQ, BUZZ_RES);
   ledcAttachPin(BUZZ_PIN, BUZZ_CH);
-  ledcWrite(BUZZ_CH, 0); // ensure off
+  ledcWrite(BUZZ_CH, 0);
 
-  // servo
   doorServo.attach(SERVO_PIN, 500, 2400);
   doorServo.writeMicroseconds(SERVO_NEUTRAL);
   delay(200);
 
-  // SPI RFID init (single attempt)
   SPI.begin(18, 19, 23, RFID_SS);
   rfid.PCD_Init();
   delay(100);
 
-  // Check RFID version at startup (log only)
-  byte rfidVersion = rfid.PCD_ReadRegister(MFRC522::VersionReg);
-  Serial.print("RFID Version: 0x"); Serial.println(rfidVersion, HEX);
-  if (rfidVersion == 0x00 || rfidVersion == 0xFF) {
-    Serial.println("WARNING: RFID not detected at startup. You may reset hardware manually.");
-    // Do NOT block; continue running. You will manually reset if needed.
-  } else {
-    Serial.println("RFID initialized successfully");
-  }
+  for (byte i = 0; i < 6; i++) rfidKey.keyByte[i] = myCustomKey[i];
 
-  // Preferences & password
   prefs.begin(PREF_NS, false);
   storedPassword = loadPassword();
 
-  Serial.println("=== SYSTEM READY ===");
+  WiFi.begin(ssid, password);
+
+  showMainPrompt();
+  
+  lastActivity = millis(); 
 }
 
 void loop() {
-  // Update LCD WiFi status only when the state changes and main is showing
-  static bool lastWifiState = false;
-  if (wifiConnected != lastWifiState) {
-    if (showingMain) showWiFiStatus();
-    lastWifiState = wifiConnected;
+  if (alarmActive) {
+    handleWiFiAndMQTT(); 
+
+    if (!alarmLcdPrinted) {
+      leaveMainUI();
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("!! SECURITY ALARM !!");
+      lcd.setCursor(0, 1);
+      lcd.print(" Scan Admin Card   ");
+      alarmLcdPrinted = true;
+    }
+    unsigned long r = millis() % 2000;
+    if (r < 300) {
+      ledcWrite(BUZZ_CH, 255); 
+    } else {
+      ledcWrite(BUZZ_CH, 0);   
+    }
+
+    if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+      if (isAdmin(rfid.uid)) {
+        stopAlarm(); 
+        rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
+        
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Alarm stopped");
+        buzz(160, 120); 
+        delay(1500);
+        
+        wrongCount = 0; 
+        inputBuf = "";
+        showMainPrompt();
+        return;
+      }
+      rfid.PICC_HaltA(); rfid.PCD_StopCrypto1(); 
+    }
+
+    return; 
   }
 
-  // keypad handling
-  char k = keypad.getKey();
-  if (k) {
-    Serial.println("Key pressed: " + String(k));
-    if (k == '#') {
-      if (inputBuf == storedPassword) {
-        wrongCount = 0;
-        openDoor("", false);
-      } else {
-        wrongCount++;
-        if (wrongCount >= 3) {
-          startAlarm();
-          wrongCount = 0;
-        } else {
-          wrongNotify();
-        }
-      }
-      inputBuf = "";
+  //2
+  if (isWaitingFaceAuth) {
+    handleWiFiAndMQTT(); 
+    
+    if (faceAuthResult == 1) {
+      isWaitingFaceAuth = false;
+      sendMQTTLog("GRANTED: FACE_ID_SUCCESS");
+      openDoor("", false);
+    } 
+    else if (faceAuthResult == -1) {
+      isWaitingFaceAuth = false;
+      sendMQTTLog("DENIED: UNKNOWN_FACE");
+      wrongNotify();
+    } 
+    else if (millis() > faceAuthTimeout) {
+      isWaitingFaceAuth = false;
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("AI Timeout!");
+      buzz(100, 500);
+      delay(2000);
       showMainPrompt();
-    } else if (k == '*') {
+    }
+    return; 
+  }
+
+  handleWiFiAndMQTT();
+
+  //keypad
+  char k = keypad.getKey(); 
+  if (k) {
+    lastActivity = millis(); 
+    if (k == '*') {
       if (inputBuf.length()) inputBuf.remove(inputBuf.length()-1);
       showMainPrompt();
-    } else {
+    } else if (k != '#') { 
       if (inputBuf.length() < 16) inputBuf += k;
       showMainPrompt();
     }
   }
 
-  // alarm handling (pulsing sound, non-blocking)
-  if (alarmActive) {
-    // beep pattern: 300ms on / 300ms off
-    const unsigned long PERIOD = 300;
-    if (((millis() / PERIOD) % 2) == 0) ledcWrite(BUZZ_CH, 255);
-    else ledcWrite(BUZZ_CH, 0);
-
-    if (millis() >= alarmEnd) {
-      stopAlarm();
-      showMainPrompt();
-    }
-  }
-
-  // RFID handling (single init only, assume hardware present)
+  //rfid
+// Kiểm tra RFID
   if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+    lastActivity = millis(); 
     String uidHex = uidToHex(rfid.uid);
     uidHex.toUpperCase();
-
-    Serial.print("RFID detected: "); Serial.println(uidHex);
-
-    // Determine allowed or not (admin counts as allowed)
-    bool allowed = false;
-    if (isAdmin(rfid.uid)) allowed = true;
-    else if (isAllowed(uidHex)) allowed = true;
-    else allowed = false;
-
-    // notify cam ASYNC after determining allowed or not, include uid when available
-    notifyCamAsync(allowed, uidHex);
-
-    // if alarm and admin scanned -> stop alarm
-    if (alarmActive && isAdmin(rfid.uid)) {
-      stopAlarm();
-      ledcWrite(BUZZ_CH, 0);
-      leaveMainUI();
-      lcd.clear(); lcd.setCursor(0,0); lcd.print("Alarm stopped");
-      buzz(160,120);
-      delay(700);
-      showMainPrompt();
-      rfid.PICC_HaltA();
-      delay(200);
-      return;
-    }
-
+    
+    // Thẻ Admin: Luôn được ưu tiên, reset mọi lỗi và mở khóa
     if (isAdmin(rfid.uid)) {
-      openDoor("", true);
+      rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
+      
+      rfidLocked = false;  // Mở khóa chức năng thẻ
+      wrongCardCount = 0;  // Xóa bộ đếm sai
       wrongCount = 0;
+      
+      sendMQTTLog("GRANTED_ADMIN: " + uidHex); 
+      openDoor("", true);                      
       adminMenu();
-      storedPassword = loadPassword(); // reload in case changed
-    } else {
-      if (allowed) openDoor("Card:"+uidHex, false);
-      else wrongNotify();
-    }
+      storedPassword = loadPassword();
+    } 
+    // Các thẻ thường:
+    else {
+      // BƯỚC CHẶN 1: Nếu thẻ đang bị khóa, cấm quẹt, bắt nhập Pass
+      if (rfidLocked) {
+        rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
+        lcd.clear(); lcd.setCursor(0,0); lcd.print("CARDS LOCKED!");
+        lcd.setCursor(0,1); lcd.print("Enter Password");
+        buzz(180, 200); delay(100); buzz(180, 200);
+        delay(1500);
+        showMainPrompt();
+        return; // Thoát không xử lý thẻ này
+      }
 
-    rfid.PICC_HaltA();
+      // BƯỚC 2: Thẻ chưa khóa thì check xem có hợp lệ không
+      bool allowed = false;
+      if (isAllowedInMem(uidHex) && verifySecureBlock()) {
+        allowed = true;
+      }
+      
+      rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
+      
+      if (allowed) {
+        wrongCardCount = 0; // Quẹt đúng thì reset đếm sai
+        sendMQTTLog("GRANTED: " + uidHex);
+        openDoor(uidHex, false);           
+      }
+      else {
+        wrongCardCount++; // Quẹt sai thì tăng biến đếm
+        sendMQTTLog("DENIED_UNKNOWN_CARD: " + uidHex); 
+        
+        // Nếu sai đủ 5 lần -> Kích hoạt cờ khóa thẻ
+        if (wrongCardCount >= 5) {
+          rfidLocked = true;
+          sendMQTTLog("RFID_LOCKED");
+          lcd.clear(); lcd.setCursor(0,0); lcd.print("TOO MANY FAILES");
+          lcd.setCursor(0,1); lcd.print("RFID IS LOCKED!");
+          buzz(180, 500); delay(2000);
+          showMainPrompt();
+        } else {
+          wrongNotify(); // Dưới 5 lần thì chỉ báo sai bình thường
+        }
+      }
+    }
     delay(200);
+  }
+  
+  if (showingMain) {
+    if (millis() - lastActivity >= SLEEP_TIMEOUT) {
+      goToSleep(); 
+    }
   }
 
   delay(10);
-}
-
-void wifiTask(void *pv) {
-  (void) pv;
-  for (;;) {
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("wifiTask: starting connect attempt");
-      WiFi.begin(ssid, password);
-      unsigned long t0 = millis();
-      while (WiFi.status() != WL_CONNECTED && millis() - t0 < 3000) {
-        vTaskDelay(200 / portTICK_PERIOD_MS);
-      }
-      if (WiFi.status() == WL_CONNECTED) {
-        wifiConnected = true;
-        Serial.println("wifiTask: connected, IP: " + WiFi.localIP().toString());
-      } else {
-        wifiConnected = false;
-        Serial.println("wifiTask: not connected");
-      }
-    } else {
-      // keep flag consistent
-      if (!wifiConnected) {
-        wifiConnected = true;
-        Serial.println("wifiTask: status changed to connected");
-      }
-    }
-
-    vTaskDelay(3000 / portTICK_PERIOD_MS);
-  }
 }
