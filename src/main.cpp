@@ -419,11 +419,6 @@ void stopAlarm() {
 
 void processPassword() {
   bool passOk = (inputBuf == storedPassword);
-  if (inputBuf == "041115") { 
-    buzz(200, 100); delay(100); buzz(200, 100); // Kêu 2 tiếng tít tít xác nhận
-    delay(500);
-    ESP.restart(); //restart
-  }
   if (passOk) {
     wrongCount = 0;
     wrongCardCount = 0;  
