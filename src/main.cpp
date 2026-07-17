@@ -73,6 +73,8 @@ const int MAX_CARDS = 60;
 String inputBuf = "";
 String storedPassword;
 int wrongCount = 0;
+int wrongFaceCount = 0;   // Đếm số lần sai khuôn mặt
+bool faceLocked = false;  // Cờ khóa chức năng khuôn mặt
 int wrongCardCount = 0;   
 bool rfidLocked = false;
 bool alarmActive = false;
@@ -321,7 +323,7 @@ void showMainPrompt() {
   showingMain = true;
   lcd.clear();
   lcd.setCursor(0,0);
-  lcd.print("Quet the/Nhap pass");
+  lcd.print("Scan card/Enter pass");
   lcd.setCursor(0,1);
   lcd.print("*:DEL #: ENTER");
   
@@ -422,19 +424,36 @@ void processPassword() {
   if (passOk) {
     wrongCount = 0;
     wrongCardCount = 0;  
+    wrongFaceCount = 0; 
     rfidLocked = false;  
-    openDoor("PASSWORD", false);      
+    faceLocked = false; 
+    
+    if (alarmActive) {
+      stopAlarm(); // Tắt báo động ngay lập tức nếu nhập đúng pass
+    }
+    openDoor("", false);      
   } else {
-    wrongCount++;
-    if (wrongCount >= 5) { 
-      startAlarm();
-      wrongCount = 0;
+    if (!alarmActive) { 
+      wrongCount++;
+      if (wrongCount >= 5) { 
+        startAlarm();
+        wrongCount = 0;
+      } else {
+        wrongNotify();
+      }
     } else {
-      wrongNotify();
+      // Đang báo động mà nhập sai pass -> Chỉ kêu tít 1 cái cảnh báo
+      buzz(180, 200);
     }
   }
   inputBuf = "";
-  showMainPrompt();
+  if (!alarmActive) {
+    showMainPrompt(); // Chỉ hiển thị lại UI nếu không có báo động
+  } else {
+    // Nếu đang báo động, xóa trắng dòng hiển thị dấu * để nhập lại
+    lcd.setCursor(0, 2);
+    lcd.print("                    ");
+  }
 }
 
 void triggerFaceAuth() {
@@ -457,18 +476,31 @@ void triggerFaceAuth() {
 
 void keypadEvent(KeypadEvent key) {
   lastActivity = millis();
-  wakeUpLcdIfNeeded(); // Chạm phím bất kỳ là sáng màn hình
+  wakeUpLcdIfNeeded();
   
   if (key == '#') {
     switch (keypad.getState()) {
       case HOLD:
         isHoldingHash = true;
-        if (!alarmActive) { 
+        // KHÓA MẶT: Báo động hoặc bị khóa thẻ/khóa mặt thì không cho quét
+        if (!alarmActive && !rfidLocked && !faceLocked) { 
           triggerFaceAuth();
+        } 
+        else if (!alarmActive && (rfidLocked || faceLocked)) {
+          leaveMainUI();
+          lcd.clear();
+          lcd.setCursor(0,0);
+          lcd.print("FACE LOCKED!");
+          lcd.setCursor(0,1);
+          lcd.print("Use Card or Pass");
+          buzz(180, 200); delay(100); buzz(180, 200);
+          delay(1500);
+          showMainPrompt();
         }
         break;
       case RELEASED:
-        if (!isHoldingHash && !isWaitingFaceAuth && !alarmActive) {
+        // Đã xóa điều kiện !alarmActive ở đây
+        if (!isHoldingHash && !isWaitingFaceAuth) {
           processPassword(); 
         }
         isHoldingHash = false;
@@ -678,9 +710,36 @@ void setup() {
 }
 
 void loop() {
+  handleWiFiAndMQTT();
+
+// 1. ĐỌC KEYPAD LUÔN ĐƯỢC ƯU TIÊN (Để pass hoạt động ngay cả khi báo động)
+  char k = keypad.getKey(); 
+  if (k) {
+    lastActivity = millis(); 
+    wakeUpLcdIfNeeded(); 
+    
+    if (k == '*') {
+      if (inputBuf.length()) inputBuf.remove(inputBuf.length()-1);
+    } else if (k != '#') { 
+      if (inputBuf.length() < 16) inputBuf += k;
+    }
+
+    // Hiển thị giao diện tùy theo trạng thái
+    if (alarmActive) {
+      // In dấu * ở dòng số 3 khi đang trong chế độ báo động
+      lcd.setCursor(0, 2);
+      lcd.print("                    "); // Xóa nội dung cũ trên dòng 3 (20 khoảng trắng)
+      lcd.setCursor(0, 2);
+      String disp = "";
+      for (size_t i=0; i<inputBuf.length(); i++) disp += '*';
+      lcd.print(disp);
+    } else {
+      showMainPrompt(); // Nếu không báo động thì hiển thị UI bình thường
+    }
+  }
+  // 2. XỬ LÝ TRẠNG THÁI BÁO ĐỘNG
   if (alarmActive) {
-    handleWiFiAndMQTT(); 
-    wakeUpLcdIfNeeded(); // Khi báo động, luôn luôn bật sáng màn hình để cảnh báo
+    wakeUpLcdIfNeeded(); 
 
     if (!alarmLcdPrinted) {
       leaveMainUI();
@@ -688,7 +747,7 @@ void loop() {
       lcd.setCursor(0, 0);
       lcd.print("!! SECURITY ALARM !!");
       lcd.setCursor(0, 1);
-      lcd.print(" Scan Admin Card   ");
+      lcd.print("Admin/Pass to unlock"); // Nhắc người dùng có thể nhập Pass
       alarmLcdPrinted = true;
     }
     unsigned long r = millis() % 2000;
@@ -698,6 +757,7 @@ void loop() {
       ledcWrite(BUZZ_CH, 0);   
     }
 
+    // Vẫn cho phép quét thẻ Admin để tắt báo động
     if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
       if (isAdmin(rfid.uid)) {
         stopAlarm(); 
@@ -716,22 +776,33 @@ void loop() {
       }
       rfid.PICC_HaltA(); rfid.PCD_StopCrypto1(); 
     }
-    return; 
+    return; // Nếu đang báo động, chặn các logic AI và RFID bên dưới
   }
-
+  // 3. XỬ LÝ NHẬN DIỆN MẶT
   if (isWaitingFaceAuth) {
-    handleWiFiAndMQTT(); 
     wakeUpLcdIfNeeded(); 
     
     if (faceAuthResult == 1) {
       isWaitingFaceAuth = false;
+      wrongFaceCount = 0; 
       sendMQTTLog("GRANTED: FACE_ID_SUCCESS");
       openDoor("", false);
     } 
     else if (faceAuthResult == -1) {
       isWaitingFaceAuth = false;
       sendMQTTLog("DENIED: UNKNOWN_FACE");
-      wrongNotify();
+      
+      wrongFaceCount++;
+      if (wrongFaceCount >= 5) {
+        faceLocked = true;
+        sendMQTTLog("FACE_LOCKED"); 
+        lcd.clear(); lcd.setCursor(0,0); lcd.print("TOO MANY FAILES");
+        lcd.setCursor(0,1); lcd.print("FACE IS LOCKED!");
+        buzz(180, 500); delay(2000);
+        showMainPrompt();
+      } else {
+        wrongNotify();
+      }
     } 
     else if (millis() > faceAuthTimeout) {
       isWaitingFaceAuth = false;
@@ -745,50 +816,44 @@ void loop() {
     return; 
   }
 
-  handleWiFiAndMQTT();
-
-  // Đọc Keypad
-  char k = keypad.getKey(); 
-  if (k) {
-    lastActivity = millis(); 
-    wakeUpLcdIfNeeded(); // Vừa chạm phím là sáng màn hình
-    
-    if (k == '*') {
-      if (inputBuf.length()) inputBuf.remove(inputBuf.length()-1);
-      showMainPrompt();
-    } else if (k != '#') { 
-      if (inputBuf.length() < 16) inputBuf += k;
-      showMainPrompt();
-    }
-  }
-
-  // Đọc RFID
+  // 4. XỬ LÝ ĐỌC THẺ RFID
+  // 4. XỬ LÝ ĐỌC THẺ RFID
   if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
     lastActivity = millis(); 
-    wakeUpLcdIfNeeded(); // Vừa quẹt thẻ là sáng màn hình
+    wakeUpLcdIfNeeded();
 
     String uidHex = uidToHex(rfid.uid);
     uidHex.toUpperCase();
     
     if (isAdmin(rfid.uid)) {
       if (verifySecureBlock()) {
-      rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
-      rfidLocked = false; 
-      wrongCardCount = 0;  
-      wrongCount = 0;
-      sendMQTTLog("GRANTED_ADMIN: " + uidHex); 
-      openDoor("", true);                      
-      adminMenu();
-      storedPassword = loadPassword();
-    }
-    else {
-        //clone admin
         rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
-        sendMQTTLog("CLONED_WARNING: ADMIN_SPOOF_" + uidHex); 
-        lcd.clear(); lcd.setCursor(0,0); lcd.print("SECURITY ALERT!");
-        lcd.setCursor(0,1); lcd.print("Fake Admin Card!");
-        buzz(180, 500); delay(2000);
-        showMainPrompt();
+        rfidLocked = false; 
+        wrongCardCount = 0;  
+        wrongCount = 0;
+        sendMQTTLog("GRANTED_ADMIN: " + uidHex); 
+        openDoor("", true);                      
+        adminMenu();
+        storedPassword = loadPassword();
+      } else {
+        // THẺ ADMIN CLONE (GIẢ MẠO)
+        rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
+        wrongCardCount++; 
+        sendMQTTLog("CLONED_WARNING: ADMIN_" + uidHex); 
+        
+        if (wrongCardCount >= 5) {
+          rfidLocked = true;
+          sendMQTTLog("RFID_LOCKED");
+          lcd.clear(); lcd.setCursor(0,0); lcd.print("CARDS LOCKED!");
+          lcd.setCursor(0,1); lcd.print("Enter Password");
+          buzz(180, 500); delay(2000);
+          showMainPrompt();
+        } else {
+          lcd.clear(); lcd.setCursor(0,0); lcd.print("SECURITY ALERT!");
+          lcd.setCursor(0,1); lcd.print("Fake Admin Card!");
+          buzz(180, 500); delay(2000);
+          showMainPrompt();
+        }
       }
     }
     else {
@@ -802,41 +867,59 @@ void loop() {
         return; 
       }
 
-      bool allowed = false;
-      if (isAllowedInMem(uidHex) && verifySecureBlock()) {
-        allowed = true;
+      bool inMem = isAllowedInMem(uidHex);
+      bool isSecure = false;
+      if (inMem) {
+        isSecure = verifySecureBlock(); // Chỉ test bảo mật nếu thẻ có trong danh sách
       }
       
       rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
       
-      if (allowed) {
+      if (inMem && isSecure) {
+        // THẺ HỢP LỆ
         wrongCardCount = 0; 
+        wrongFaceCount = 0; 
+        faceLocked = false; 
         sendMQTTLog("GRANTED: " + uidHex);
         openDoor(uidHex, false);           
       }
       else {
         wrongCardCount++; 
-        sendMQTTLog("DENIED_UNKNOWN_CARD: " + uidHex); 
+        
+        if (inMem && !isSecure) {
+          // THẺ USER CLONE (Có UID trong DB nhưng sai mã khóa)
+          sendMQTTLog("CLONED_WARNING: USER_" + uidHex); 
+        } else {
+          // THẺ CHƯA ĐĂNG KÝ
+          sendMQTTLog("DENIED_UNKNOWN_CARD: " + uidHex); 
+        }
+        
         if (wrongCardCount >= 5) {
           rfidLocked = true;
           sendMQTTLog("RFID_LOCKED");
-          lcd.clear(); lcd.setCursor(0,0); lcd.print("TOO MANY FAILES");
-          lcd.setCursor(0,1); lcd.print("RFID IS LOCKED!");
+          lcd.clear(); lcd.setCursor(0,0); lcd.print("CARDS LOCKED!");
+          lcd.setCursor(0,1); lcd.print("Enter Password");
           buzz(180, 500); delay(2000);
           showMainPrompt();
         } else {
-          wrongNotify(); 
+          if (inMem && !isSecure) {
+             lcd.clear(); lcd.setCursor(0,0); lcd.print("SECURITY ALERT!");
+             lcd.setCursor(0,1); lcd.print("Fake Card");
+             buzz(180, 500); delay(2000);
+             showMainPrompt();
+          } else {
+             wrongNotify(); 
+          }
         }
       }
     }
     delay(200);
   }
-  
-  // LOGIC TẮT MÀN HÌNH MỚI
+ 
   if (isLcdOn) {
     if (millis() - lastActivity >= SLEEP_TIMEOUT) {
-      lcd.noBacklight(); // Chỉ tắt đèn nền, tiết kiệm điện
-      lcd.clear();       // Xóa chữ để tránh bóng mờ
+      lcd.noBacklight(); 
+      lcd.clear();       
       isLcdOn = false;
       showingMain = false; 
     }
