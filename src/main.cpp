@@ -95,13 +95,13 @@ bool isWaitingFaceAuth = false;
 int faceAuthResult = 0; 
 unsigned long faceAuthTimeout = 0;
 
-void buzz(int duty, unsigned long ms) {
+void buzz(int duty, unsigned long ms) { //ham bat coi
   ledcWrite(BUZZ_CH, duty);
   delay(ms);
   ledcWrite(BUZZ_CH, 0);
 }
 
-String uidToHex(const MFRC522::Uid &u) {
+String uidToHex(const MFRC522::Uid &u) { //chuyen uid thanh dang thap luc phan
   String s = "";
   for (byte i=0;i<u.size;i++){
     if (u.uidByte[i] < 0x10) s += "0";
@@ -111,13 +111,13 @@ String uidToHex(const MFRC522::Uid &u) {
   return s;
 }
 
-bool isAdmin(const MFRC522::Uid &u) {
+bool isAdmin(const MFRC522::Uid &u) { //kiem tra xem phai the admin k
   if (u.size != 4) return false;
   for (byte i=0;i<4;i++) if (u.uidByte[i] != ADMIN_UID[i]) return false;
   return true;
 }
 
-void handleWiFiAndMQTT() {
+void handleWiFiAndMQTT() { //lien tuc kiem tra trang thai wifi va mqtt
   bool isConnected = (WiFi.status() == WL_CONNECTED);
   
   if (isConnected != currentWiFiState) {
@@ -157,24 +157,25 @@ void handleWiFiAndMQTT() {
   }
 }
 
-void sendMQTTLog(String message) {
+void sendMQTTLog(String message) { //gui message len topic
   if (mqttClient.connected()) {
     mqttClient.publish(mqtt_topic_log, message.c_str());
   }
 }
 
+//doc mat khau voi tham so la pw
 String loadPassword() {
   String pw = prefs.getString("pw", "");
   if (pw == "") { pw = "1234"; prefs.putString("pw", pw); }
   return pw;
 }
-void savePassword(const String &pw){ prefs.putString("pw", pw); }
-int cardCount(){ return prefs.getInt("n", 0); }
-String cardAt(int i){ return prefs.getString(("uid"+String(i)).c_str(), ""); }
-void setCard(int i, const String &uid){ prefs.putString(("uid"+String(i)).c_str(), uid); }
-void setCount(int n){ prefs.putInt("n", n); }
+void savePassword(const String &pw){ prefs.putString("pw", pw); } //luu pass moi
+int cardCount(){ return prefs.getInt("n", 0); } //dem so luong the dang co
+String cardAt(int i){ return prefs.getString(("uid"+String(i)).c_str(), ""); } //truy xuat uid cua the 
+void setCard(int i, const String &uid){ prefs.putString(("uid"+String(i)).c_str(), uid); }//ghi the moi vao cuoi danh sach vi tri thu i
+void setCount(int n){ prefs.putInt("n", n); } //cap nhat lai so luong the moi lan them the moi
 
-bool addCardToMem(const String &uidIn){
+bool addCardToMem(const String &uidIn){ //add the vao bo nho
   String uid = uidIn; uid.toUpperCase();
   int n = cardCount();
   for (int i=0; i<n; i++) if (cardAt(i) == uid) return false;
@@ -182,7 +183,7 @@ bool addCardToMem(const String &uidIn){
   setCard(n, uid); setCount(n+1); return true;
 }
 
-bool removeCard(const String &uidIn){
+bool removeCard(const String &uidIn){ //xoa the ra khoi bo nho
   String uid = uidIn; uid.toUpperCase();
   int n = cardCount();
   int found = -1;
@@ -194,13 +195,13 @@ bool removeCard(const String &uidIn){
   return true;
 }
 
-bool isAllowedInMem(const String &uidIn){
+bool isAllowedInMem(const String &uidIn){ //kiem tra the co trong bo nho chua
   String uid = uidIn; uid.toUpperCase();
   int n = cardCount();
   for (int i=0; i<n; i++) if (cardAt(i) == uid) return true;
   return false;
 }
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
+void mqttCallback(char* topic, byte* payload, unsigned int length) { //lang nghe mqtt tu server de xu ly
   String message = "";
   for (int i = 0; i < length; i++) {
     message += (char)payload[i];
@@ -236,7 +237,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
-void wakeUpLcdIfNeeded() {
+void wakeUpLcdIfNeeded() { //danh thuc lcd
   if (!isLcdOn) {
     lcd.backlight();
     isLcdOn = true;
@@ -244,7 +245,7 @@ void wakeUpLcdIfNeeded() {
   }
 }
 
-int waitForCardOrCancel(String &outUid, unsigned long timeoutMs = 15000) {
+int waitForCardOrCancel(String &outUid, unsigned long timeoutMs = 15000) { //cho 15s xem co the quet hay k
   unsigned long t0 = millis();
   while (millis() - t0 < timeoutMs) {
     handleWiFiAndMQTT(); 
@@ -266,7 +267,7 @@ int waitForCardOrCancel(String &outUid, unsigned long timeoutMs = 15000) {
   return 0; 
 }
 
-bool writeSecureBlock() {
+bool writeSecureBlock() { //Thuc hien ghi khoa bao mat tu dinh nghia (myCustomKey) vao block 7 và ghi chuoi du lieu bi mat (secretData) vao Block 4
   MFRC522::StatusCode status;
   MFRC522::MIFARE_Key defaultKey;
   for (byte i = 0; i < 6; i++) defaultKey.keyByte[i] = 0xFF; 
@@ -308,7 +309,7 @@ bool writeSecureBlock() {
   return true; 
 }
 
-bool verifySecureBlock() {
+bool verifySecureBlock() { //kiem tra xem trong block 4 co ghi secreData chua
   MFRC522::StatusCode status;
   byte buffer[18];
   byte size = sizeof(buffer);
@@ -325,7 +326,7 @@ bool verifySecureBlock() {
   return true;
 }
 
-bool resetSecureBlock() {
+bool resetSecureBlock() { //reset lai data trong block 7 va 4 khi xoa the
   MFRC522::StatusCode status;
 
   status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, 7, &rfidKey, &(rfid.uid));
@@ -352,7 +353,7 @@ bool resetSecureBlock() {
   return true;
 }
 
-void showMainPrompt() {
+void showMainPrompt() { //xoa sach man hinh va in giao dien mac dinh
   showingMain = true;
   lcd.clear();
   lcd.setCursor(0,0);
@@ -373,9 +374,9 @@ void showMainPrompt() {
   }
 }
 
-void leaveMainUI() { showingMain = false; }
+void leaveMainUI() { showingMain = false; } //roi khoi main menu, giup man hinh k bi hien trang thai wifi
 
-void performDoorCycle() {
+void performDoorCycle() { //man hinh hien thi khi dong/mo cua
   wakeUpLcdIfNeeded();
   leaveMainUI();
   lcd.clear();
@@ -404,7 +405,7 @@ void performDoorCycle() {
   showMainPrompt();
 }
 
-void openDoor(const String &who, bool admin) {
+void openDoor(const String &who, bool admin) { //hien thi loi chao khi co the quet
   wakeUpLcdIfNeeded();
   leaveMainUI();
   lcd.clear();
@@ -426,7 +427,7 @@ void openDoor(const String &who, bool admin) {
   }
 }
 
-void wrongNotify() {
+void wrongNotify() { //man hinh hien thi khi the quet sai
   wakeUpLcdIfNeeded();
   leaveMainUI();
   lcd.clear();
@@ -438,21 +439,21 @@ void wrongNotify() {
   showMainPrompt();
 }
 
-void startAlarm() { 
+void startAlarm() {  //bat co alarmActive = true de ham loop thay va bat coi
   wakeUpLcdIfNeeded();
   alarmActive = true; 
   alarmLcdPrinted = false; 
   sendMQTTLog("PASS_LOCKED");
 }
 
-void stopAlarm() { 
+void stopAlarm() { //bat co alarmActive = false de ham loop thay va tat coi
   alarmActive = false; 
   alarmLcdPrinted = false;
   ledcWrite(BUZZ_CH, 0); 
   lastActivity = millis(); 
 }
 
-void processPassword() {
+void processPassword() { //kiem tra mat khau
   bool passOk = (inputBuf == storedPassword);
   if (passOk) {
     wrongCount = 0;
@@ -487,7 +488,7 @@ void processPassword() {
   }
 }
 
-void triggerFaceAuth() {
+void triggerFaceAuth() { //gui mqtt yeu cau backend nhan dien khuon mat
   wakeUpLcdIfNeeded();
   leaveMainUI();
   lcd.clear();
@@ -505,7 +506,7 @@ void triggerFaceAuth() {
   faceAuthTimeout = millis() + 15000; 
 }
 
-void keypadEvent(KeypadEvent key) {
+void keypadEvent(KeypadEvent key) {   //kiem tra phim #, neu he thong dang bi khoa thi se khong the truy cap chuc nang nhan dien khuon mat
   lastActivity = millis();
   wakeUpLcdIfNeeded();
   
@@ -541,7 +542,7 @@ void keypadEvent(KeypadEvent key) {
   }
 }
 
-void adminMenu() {
+void adminMenu() { //truy cap vao menu admin
   wakeUpLcdIfNeeded();
   leaveMainUI();
   lcd.clear();
@@ -785,19 +786,24 @@ void loop() {
 
     if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
       if (isAdmin(rfid.uid)) {
-        stopAlarm(); 
-        rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
-        
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("Alarm stopped");
-        buzz(160, 120); 
-        delay(1500);
-        
-        wrongCount = 0; 
-        inputBuf = "";
-        showMainPrompt();
-        return;
+        if (verifySecureBlock()) { 
+          stopAlarm(); 
+          rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
+          
+          lcd.clear();
+          lcd.setCursor(0, 0);
+          lcd.print("Alarm stopped");
+          buzz(160, 120); 
+          delay(1500);
+          
+          wrongCount = 0; 
+          inputBuf = "";
+          showMainPrompt();
+          return;
+        } else {
+          String uidHex = uidToHex(rfid.uid);
+          sendMQTTLog("CLONED_WARNING: ADMIN_" + uidHex);
+        }
       }
       rfid.PICC_HaltA(); rfid.PCD_StopCrypto1(); 
     }
@@ -858,7 +864,6 @@ void loop() {
         adminMenu();
         storedPassword = loadPassword();
       } else {
-        // THẺ ADMIN CLONE (GIẢ MẠO)
         rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
         wrongCardCount++; 
         sendMQTTLog("CLONED_WARNING: ADMIN_" + uidHex); 
