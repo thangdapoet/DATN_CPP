@@ -8,20 +8,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
-
-void showMainPrompt();
-void adminMenu();
-void handleWiFiAndMQTT(); 
-void sendMQTTLog(String message);
-void processPassword();
-void triggerFaceAuth();
-void keypadEvent(KeypadEvent key);
-void mqttCallback(char* topic, byte* payload, unsigned int length);
-void wakeUpLcdIfNeeded(); 
-bool removeCard(const String &uidIn);
-void openDoor(const String &who, bool admin = false);
-void stopAlarm();
-
+//cau hinh bien toan cu
 const char* ssid = "Thang";         
 const char* password = "15112004";        
 const char* mqtt_server = "broker.emqx.io";    
@@ -32,6 +19,8 @@ const char* mqtt_topic_cmd = "quangthang/smartlock/cmd";
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 unsigned long lastReconnectAttempt = 0;
+bool currentWiFiState = false; 
+unsigned long lastWiFiAttempt = 0;
 
 const byte ROWS = 4, COLS = 4;
 char keysArr[ROWS][COLS] = {
@@ -42,6 +31,7 @@ byte rowPins[ROWS] = {27,14,12,13};
 byte colPins[COLS] = {32,33,25,26};
 Keypad keypad = Keypad( makeKeymap(keysArr), rowPins, colPins, ROWS, COLS );
 
+// LCD
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
 // RFID
@@ -49,11 +39,12 @@ const int RFID_SS = 2;
 const int RFID_RST = 4;
 MFRC522 rfid(RFID_SS, RFID_RST);
 MFRC522::MIFARE_Key rfidKey;
-
 byte myCustomKey[6] = {0x15, 0x11, 0x20, 0x04, 0x0A, 0x0B}; 
 byte secretData[16] = {'Q','U','A','N','G','T','H','A','N','G','_','S','E','C','U','R'};
 const byte SECURE_BLOCK = 4;
+const byte ADMIN_UID[4] = {0xAC, 0x64, 0x91, 0x05};
 
+// Servo
 Servo doorServo;
 const int SERVO_PIN = 15;
 int SERVO_NEUTRAL = 1500; 
@@ -67,12 +58,12 @@ const int BUZZ_CH = 6;
 const int BUZZ_FREQ = 2000;
 const int BUZZ_RES = 8;
 
-const byte ADMIN_UID[4] = {0xAC, 0x64, 0x91, 0x05};
-
+// Preferences (Bộ nhớ Flash)
 Preferences prefs;
 const char *PREF_NS = "rfid_store";
 const int MAX_CARDS = 60;
 
+// Các biến trạng thái logic
 String inputBuf = "";
 String storedPassword;
 int wrongCount = 0;
@@ -84,24 +75,66 @@ bool alarmActive = false;
 bool alarmLcdPrinted = false; 
 bool showingMain = false;
 bool isLcdOn = true; 
-
 unsigned long lastActivity = 0;
 const unsigned long SLEEP_TIMEOUT = 15000UL; 
-bool currentWiFiState = false; 
-unsigned long lastWiFiAttempt = 0;
-
 bool isHoldingHash = false;
 bool isWaitingFaceAuth = false;
 int faceAuthResult = 0; 
 unsigned long faceAuthTimeout = 0;
 
-void buzz(int duty, unsigned long ms) { //ham bat coi
+// ==========================================
+// 2. KHAI BÁO NGUYÊN MẪU HÀM (FORWARD DECLARATIONS)
+// Bắt buộc phải có để tránh lỗi "not declared in this scope"
+// ==========================================
+// Nhóm Tiện ích
+void buzz(int duty, unsigned long ms);
+String uidToHex(const MFRC522::Uid &u);
+bool isAdmin(const MFRC522::Uid &u);
+// Nhóm Quản lý bộ nhớ
+String loadPassword();
+void savePassword(const String &pw);
+int cardCount();
+String cardAt(int i);
+void setCard(int i, const String &uid);
+void setCount(int n);
+bool addCardToMem(const String &uidIn);
+bool removeCard(const String &uidIn);
+bool isAllowedInMem(const String &uidIn);
+// Nhóm Giao tiếp Mạng & MQTT
+void handleWiFiAndMQTT();
+void sendMQTTLog(String message);
+void mqttCallback(char* topic, byte* payload, unsigned int length);
+// Nhóm Trạng thái (Cửa & Báo động)
+void performDoorCycle();
+void openDoor(const String &who, bool admin = false);
+void wrongNotify();
+void startAlarm();
+void stopAlarm();
+// Nhóm Giao diện LCD
+void showMainPrompt();
+void leaveMainUI();
+void wakeUpLcdIfNeeded();
+void adminMenu();
+// Nhóm RFID & Bảo mật
+int waitForCardOrCancel(String &outUid, unsigned long timeoutMs = 15000);
+bool writeSecureBlock();
+bool verifySecureBlock();
+bool resetSecureBlock();
+// Nhóm Xác thực
+void processPassword();
+void triggerFaceAuth();
+void keypadEvent(KeypadEvent key);
+
+// ==========================================
+// 3. NHÓM TIỆN ÍCH CƠ BẢN (UTILITY)
+// ==========================================
+void buzz(int duty, unsigned long ms) { 
   ledcWrite(BUZZ_CH, duty);
   delay(ms);
   ledcWrite(BUZZ_CH, 0);
 }
 
-String uidToHex(const MFRC522::Uid &u) { //chuyen uid thanh dang thap luc phan
+String uidToHex(const MFRC522::Uid &u) { 
   String s = "";
   for (byte i=0;i<u.size;i++){
     if (u.uidByte[i] < 0x10) s += "0";
@@ -111,13 +144,62 @@ String uidToHex(const MFRC522::Uid &u) { //chuyen uid thanh dang thap luc phan
   return s;
 }
 
-bool isAdmin(const MFRC522::Uid &u) { //kiem tra xem phai the admin k
+bool isAdmin(const MFRC522::Uid &u) { 
   if (u.size != 4) return false;
   for (byte i=0;i<4;i++) if (u.uidByte[i] != ADMIN_UID[i]) return false;
   return true;
 }
 
-void handleWiFiAndMQTT() { //lien tuc kiem tra trang thai wifi va mqtt
+// ==========================================
+// 4. NHÓM QUẢN LÝ BỘ NHỚ (PREFERENCES)
+// ==========================================
+String loadPassword() {
+  String pw = prefs.getString("pw", "");
+  if (pw == "") { pw = "1234"; prefs.putString("pw", pw); }
+  return pw;
+}
+
+void savePassword(const String &pw){ prefs.putString("pw", pw); } 
+
+int cardCount(){ return prefs.getInt("n", 0); } 
+
+String cardAt(int i){ return prefs.getString(("uid"+String(i)).c_str(), ""); } 
+
+void setCard(int i, const String &uid){ prefs.putString(("uid"+String(i)).c_str(), uid); }
+
+void setCount(int n){ prefs.putInt("n", n); } 
+
+bool addCardToMem(const String &uidIn){ 
+  String uid = uidIn; uid.toUpperCase();
+  int n = cardCount();
+  for (int i=0; i<n; i++) if (cardAt(i) == uid) return false;
+  if (n >= MAX_CARDS) return false;
+  setCard(n, uid); setCount(n+1); return true;
+}
+
+bool removeCard(const String &uidIn){ 
+  String uid = uidIn; uid.toUpperCase();
+  int n = cardCount();
+  int found = -1;
+  for (int i=0; i<n; i++) if (cardAt(i) == uid) { found = i; break; }
+  if (found == -1) return false;
+  for (int i=found; i<n-1; i++) setCard(i, cardAt(i+1));
+  prefs.remove(("uid"+String(n-1)).c_str());
+  setCount(n-1);
+  return true;
+}
+
+bool isAllowedInMem(const String &uidIn){ 
+  String uid = uidIn; uid.toUpperCase();
+  int n = cardCount();
+  for (int i=0; i<n; i++) if (cardAt(i) == uid) return true;
+  return false;
+}
+
+// ==========================================
+// 5. NHÓM GIAO TIẾP MẠNG & MQTT
+// ==========================================
+void handleWiFiAndMQTT() { 
   bool isConnected = (WiFi.status() == WL_CONNECTED);
   
   if (isConnected != currentWiFiState) {
@@ -157,51 +239,13 @@ void handleWiFiAndMQTT() { //lien tuc kiem tra trang thai wifi va mqtt
   }
 }
 
-void sendMQTTLog(String message) { //gui message len topic
+void sendMQTTLog(String message) { 
   if (mqttClient.connected()) {
     mqttClient.publish(mqtt_topic_log, message.c_str());
   }
 }
 
-//doc mat khau voi tham so la pw
-String loadPassword() {
-  String pw = prefs.getString("pw", "");
-  if (pw == "") { pw = "1234"; prefs.putString("pw", pw); }
-  return pw;
-}
-void savePassword(const String &pw){ prefs.putString("pw", pw); } //luu pass moi
-int cardCount(){ return prefs.getInt("n", 0); } //dem so luong the dang co
-String cardAt(int i){ return prefs.getString(("uid"+String(i)).c_str(), ""); } //truy xuat uid cua the 
-void setCard(int i, const String &uid){ prefs.putString(("uid"+String(i)).c_str(), uid); }//ghi the moi vao cuoi danh sach vi tri thu i
-void setCount(int n){ prefs.putInt("n", n); } //cap nhat lai so luong the moi lan them the moi
-
-bool addCardToMem(const String &uidIn){ //add the vao bo nho
-  String uid = uidIn; uid.toUpperCase();
-  int n = cardCount();
-  for (int i=0; i<n; i++) if (cardAt(i) == uid) return false;
-  if (n >= MAX_CARDS) return false;
-  setCard(n, uid); setCount(n+1); return true;
-}
-
-bool removeCard(const String &uidIn){ //xoa the ra khoi bo nho
-  String uid = uidIn; uid.toUpperCase();
-  int n = cardCount();
-  int found = -1;
-  for (int i=0; i<n; i++) if (cardAt(i) == uid) { found = i; break; }
-  if (found == -1) return false;
-  for (int i=found; i<n-1; i++) setCard(i, cardAt(i+1));
-  prefs.remove(("uid"+String(n-1)).c_str());
-  setCount(n-1);
-  return true;
-}
-
-bool isAllowedInMem(const String &uidIn){ //kiem tra the co trong bo nho chua
-  String uid = uidIn; uid.toUpperCase();
-  int n = cardCount();
-  for (int i=0; i<n; i++) if (cardAt(i) == uid) return true;
-  return false;
-}
-void mqttCallback(char* topic, byte* payload, unsigned int length) { //lang nghe mqtt tu server de xu ly
+void mqttCallback(char* topic, byte* payload, unsigned int length) { 
   String message = "";
   for (int i = 0; i < length; i++) {
     message += (char)payload[i];
@@ -212,8 +256,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) { //lang nghe
     if (message.startsWith("WEB_DELETE_CARD: ")) {
       String uidToDelete = message.substring(17); 
       uidToDelete.trim();
-
-     removeCard(uidToDelete);
+      removeCard(uidToDelete);
     } 
     else if (message == "FACE_SUCCESS") {
       faceAuthResult = 1;
@@ -228,155 +271,19 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) { //lang nghe
     else if (message == "WEB_STOP_ALARM") {
       if (alarmActive) {
         Serial.println("Nhận lệnh tắt báo động từ Web!");
-        stopAlarm(); // Gọi hàm tắt còi
+        stopAlarm(); 
         lcd.clear(); lcd.setCursor(0, 0); lcd.print("Web Stopped!");
         buzz(160, 120); delay(1500);
-        wrongCount = 0; inputBuf = ""; showMainPrompt(); // Reset lại màn hình
+        wrongCount = 0; inputBuf = ""; showMainPrompt(); 
       }
     }
   }
 }
 
-void wakeUpLcdIfNeeded() { //danh thuc lcd
-  if (!isLcdOn) {
-    lcd.backlight();
-    isLcdOn = true;
-    showMainPrompt();
-  }
-}
-
-int waitForCardOrCancel(String &outUid, unsigned long timeoutMs = 15000) { //cho 15s xem co the quet hay k
-  unsigned long t0 = millis();
-  while (millis() - t0 < timeoutMs) {
-    handleWiFiAndMQTT(); 
-    char k = keypad.getKey();
-    if (k) {
-      lastActivity = millis(); 
-      wakeUpLcdIfNeeded();
-      if (k == 'C' || k == 'c' || k == 'D') return -1; 
-    }
-
-    if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-      lastActivity = millis();
-      wakeUpLcdIfNeeded();
-      outUid = uidToHex(rfid.uid);
-      return 1; 
-    }
-    delay(30);
-  }
-  return 0; 
-}
-
-bool writeSecureBlock() { //Thuc hien ghi khoa bao mat tu dinh nghia (myCustomKey) vao block 7 và ghi chuoi du lieu bi mat (secretData) vao Block 4
-  MFRC522::StatusCode status;
-  MFRC522::MIFARE_Key defaultKey;
-  for (byte i = 0; i < 6; i++) defaultKey.keyByte[i] = 0xFF; 
-
-  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, 7, &defaultKey, &(rfid.uid));
-
-  if (status != MFRC522::STATUS_OK) {
-    rfid.PCD_StopCrypto1(); 
-    rfid.PICC_HaltA();      
-    
-    delay(50); 
-    
-    if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
-       return false;
-    }
-
-    status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, 7, &rfidKey, &(rfid.uid));
-  }
-
-  if (status != MFRC522::STATUS_OK) {
-    return false;
-  }
-
-  byte sectorTrailerData[16] = {
-    myCustomKey[0], myCustomKey[1], myCustomKey[2], myCustomKey[3], myCustomKey[4], myCustomKey[5],
-    0xFF, 0x07, 0x80, 0x69,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
-  };
-
-  status = rfid.MIFARE_Write(7, sectorTrailerData, 16);
-  if (status != MFRC522::STATUS_OK) return false;
-
-  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, SECURE_BLOCK, &rfidKey, &(rfid.uid));
-  if (status != MFRC522::STATUS_OK) return false;
-
-  status = rfid.MIFARE_Write(SECURE_BLOCK, secretData, 16);
-  if (status != MFRC522::STATUS_OK) return false;
-
-  return true; 
-}
-
-bool verifySecureBlock() { //kiem tra xem trong block 4 co ghi secreData chua
-  MFRC522::StatusCode status;
-  byte buffer[18];
-  byte size = sizeof(buffer);
-  
-  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, SECURE_BLOCK, &rfidKey, &(rfid.uid));
-  if (status != MFRC522::STATUS_OK) return false;
-  
-  status = rfid.MIFARE_Read(SECURE_BLOCK, buffer, &size);
-  if (status != MFRC522::STATUS_OK) return false;
-  
-  for (byte i = 0; i < 16; i++) {
-    if (buffer[i] != secretData[i]) return false;
-  }
-  return true;
-}
-
-bool resetSecureBlock() { //reset lai data trong block 7 va 4 khi xoa the
-  MFRC522::StatusCode status;
-
-  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, 7, &rfidKey, &(rfid.uid));
-  if (status != MFRC522::STATUS_OK) return false;
-
-  byte factoryTrailer[16] = {
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0x07, 0x80, 0x69,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
-  };
-
-  status = rfid.MIFARE_Write(7, factoryTrailer, 16);
-  if (status != MFRC522::STATUS_OK) return false;
-
-  MFRC522::MIFARE_Key defaultKey;
-  for (byte i = 0; i < 6; i++) defaultKey.keyByte[i] = 0xFF;
-
-  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, SECURE_BLOCK, &defaultKey, &(rfid.uid));
-  if (status == MFRC522::STATUS_OK) {
-    byte emptyBlock[16] = {0}; 
-    rfid.MIFARE_Write(SECURE_BLOCK, emptyBlock, 16); 
-  }
-
-  return true;
-}
-
-void showMainPrompt() { //xoa sach man hinh va in giao dien mac dinh
-  showingMain = true;
-  lcd.clear();
-  lcd.setCursor(0,0);
-  lcd.print("Scan card/Enter pass");
-  lcd.setCursor(0,1);
-  lcd.print("*:DEL #: ENTER");
-  
-  lcd.setCursor(0,2);
-  String disp = "";
-  for (size_t i=0; i<inputBuf.length(); i++) disp += '*';
-  lcd.print(disp);
-
-  lcd.setCursor(0,3);
-  if (WiFi.status() == WL_CONNECTED) {
-    lcd.print("WIFI: CONNECTED   ");
-  } else {
-    lcd.print("WIFI: DISCONNECTED");
-  }
-}
-
-void leaveMainUI() { showingMain = false; } //roi khoi main menu, giup man hinh k bi hien trang thai wifi
-
-void performDoorCycle() { //man hinh hien thi khi dong/mo cua
+// ==========================================
+// 6. NHÓM ĐIỀU KHIỂN TRẠNG THÁI (CỬA & BÁO ĐỘNG)
+// ==========================================
+void performDoorCycle() { 
   wakeUpLcdIfNeeded();
   leaveMainUI();
   lcd.clear();
@@ -405,7 +312,7 @@ void performDoorCycle() { //man hinh hien thi khi dong/mo cua
   showMainPrompt();
 }
 
-void openDoor(const String &who, bool admin) { //hien thi loi chao khi co the quet
+void openDoor(const String &who, bool admin) { 
   wakeUpLcdIfNeeded();
   leaveMainUI();
   lcd.clear();
@@ -427,7 +334,7 @@ void openDoor(const String &who, bool admin) { //hien thi loi chao khi co the qu
   }
 }
 
-void wrongNotify() { //man hinh hien thi khi the quet sai
+void wrongNotify() { 
   wakeUpLcdIfNeeded();
   leaveMainUI();
   lcd.clear();
@@ -439,110 +346,55 @@ void wrongNotify() { //man hinh hien thi khi the quet sai
   showMainPrompt();
 }
 
-void startAlarm() {  //bat co alarmActive = true de ham loop thay va bat coi
+void startAlarm() {  
   wakeUpLcdIfNeeded();
   alarmActive = true; 
   alarmLcdPrinted = false; 
   sendMQTTLog("PASS_LOCKED");
 }
 
-void stopAlarm() { //bat co alarmActive = false de ham loop thay va tat coi
+void stopAlarm() { 
   alarmActive = false; 
   alarmLcdPrinted = false;
   ledcWrite(BUZZ_CH, 0); 
   lastActivity = millis(); 
 }
 
-void processPassword() { //kiem tra mat khau
-  bool passOk = (inputBuf == storedPassword);
-  if (passOk) {
-    wrongCount = 0;
-    wrongCardCount = 0;  
-    wrongFaceCount = 0; 
-    rfidLocked = false;  
-    faceLocked = false; 
-    
-    if (alarmActive) {
-      stopAlarm(); 
-    }
-    openDoor("", false);      
-  } else {
-    if (!alarmActive) { 
-      wrongCount++;
-      if (wrongCount >= 5) { 
-        startAlarm();
-        wrongCount = 0;
-      } else {
-        wrongNotify();
-      }
-    } else {
-      buzz(180, 200);
-    }
-  }
-  inputBuf = "";
-  if (!alarmActive) {
-    showMainPrompt(); 
-  } else {
-    lcd.setCursor(0, 2);
-    lcd.print("                    ");
-  }
-}
-
-void triggerFaceAuth() { //gui mqtt yeu cau backend nhan dien khuon mat
-  wakeUpLcdIfNeeded();
-  leaveMainUI();
+// ==========================================
+// 7. NHÓM GIAO DIỆN LCD (UI)
+// ==========================================
+void showMainPrompt() { 
+  showingMain = true;
   lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Authenticating...");
-  lcd.setCursor(0, 1);
-  lcd.print("Please wait...");
+  lcd.setCursor(0,0);
+  lcd.print("Scan card/Enter pass");
+  lcd.setCursor(0,1);
+  lcd.print("*:DEL #: ENTER");
   
-  buzz(100, 150); delay(100); buzz(100, 150);
+  lcd.setCursor(0,2);
+  String disp = "";
+  for (size_t i=0; i<inputBuf.length(); i++) disp += '*';
+  lcd.print(disp);
 
-  sendMQTTLog("REQUEST_FACE_AUTH: HOLD"); 
-  
-  isWaitingFaceAuth = true;
-  faceAuthResult = 0;
-  faceAuthTimeout = millis() + 15000; 
-}
-
-void keypadEvent(KeypadEvent key) {   //kiem tra phim #, neu he thong dang bi khoa thi se khong the truy cap chuc nang nhan dien khuon mat
-  lastActivity = millis();
-  wakeUpLcdIfNeeded();
-  
-  if (key == '#') {
-    switch (keypad.getState()) {
-      case HOLD:
-        isHoldingHash = true;
-        if (!alarmActive && !rfidLocked && !faceLocked) { 
-          triggerFaceAuth();
-        } 
-        else if (!alarmActive && (rfidLocked || faceLocked)) {
-          leaveMainUI();
-          lcd.clear();
-          lcd.setCursor(0,0);
-          lcd.print("FACE LOCKED!");
-          lcd.setCursor(0,1);
-          lcd.print("Use Card or Pass");
-          buzz(180, 200); delay(100); buzz(180, 200);
-          delay(1500);
-          showMainPrompt();
-        }
-        break;
-      case RELEASED:
-        if (!isHoldingHash && !isWaitingFaceAuth) {
-          processPassword(); 
-        }
-        isHoldingHash = false;
-        break;
-      case IDLE:
-      case PRESSED:
-        break;
-    }
+  lcd.setCursor(0,3);
+  if (WiFi.status() == WL_CONNECTED) {
+    lcd.print("WIFI: CONNECTED   ");
+  } else {
+    lcd.print("WIFI: DISCONNECTED");
   }
 }
 
-void adminMenu() { //truy cap vao menu admin
+void leaveMainUI() { showingMain = false; } 
+
+void wakeUpLcdIfNeeded() { 
+  if (!isLcdOn) {
+    lcd.backlight();
+    isLcdOn = true;
+    showMainPrompt();
+  }
+}
+
+void adminMenu() { 
   wakeUpLcdIfNeeded();
   leaveMainUI();
   lcd.clear();
@@ -699,6 +551,212 @@ void adminMenu() { //truy cap vao menu admin
   lcd.clear(); lcd.setCursor(0,0); lcd.print("Exit admin"); delay(600); showMainPrompt(); return;
 }
 
+// ==========================================
+// 8. NHÓM XỬ LÝ RFID & BẢO MẬT SECTOR
+// ==========================================
+int waitForCardOrCancel(String &outUid, unsigned long timeoutMs) { 
+  unsigned long t0 = millis();
+  while (millis() - t0 < timeoutMs) {
+    handleWiFiAndMQTT(); 
+    char k = keypad.getKey();
+    if (k) {
+      lastActivity = millis(); 
+      wakeUpLcdIfNeeded();
+      if (k == 'C' || k == 'c' || k == 'D') return -1; 
+    }
+
+    if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+      lastActivity = millis();
+      wakeUpLcdIfNeeded();
+      outUid = uidToHex(rfid.uid);
+      return 1; 
+    }
+    delay(30);
+  }
+  return 0; 
+}
+
+bool writeSecureBlock() { 
+  MFRC522::StatusCode status;
+  MFRC522::MIFARE_Key defaultKey;
+  for (byte i = 0; i < 6; i++) defaultKey.keyByte[i] = 0xFF; 
+
+  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, 7, &defaultKey, &(rfid.uid));
+
+  if (status != MFRC522::STATUS_OK) {
+    rfid.PCD_StopCrypto1(); 
+    rfid.PICC_HaltA();      
+    
+    delay(50); 
+    
+    if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
+       return false;
+    }
+
+    status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, 7, &rfidKey, &(rfid.uid));
+  }
+
+  if (status != MFRC522::STATUS_OK) {
+    return false;
+  }
+
+  byte sectorTrailerData[16] = {
+    myCustomKey[0], myCustomKey[1], myCustomKey[2], myCustomKey[3], myCustomKey[4], myCustomKey[5],
+    0xFF, 0x07, 0x80, 0x69,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+  };
+
+  status = rfid.MIFARE_Write(7, sectorTrailerData, 16);
+  if (status != MFRC522::STATUS_OK) return false;
+
+  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, SECURE_BLOCK, &rfidKey, &(rfid.uid));
+  if (status != MFRC522::STATUS_OK) return false;
+
+  status = rfid.MIFARE_Write(SECURE_BLOCK, secretData, 16);
+  if (status != MFRC522::STATUS_OK) return false;
+
+  return true; 
+}
+
+bool verifySecureBlock() { 
+  MFRC522::StatusCode status;
+  byte buffer[18];
+  byte size = sizeof(buffer);
+  
+  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, SECURE_BLOCK, &rfidKey, &(rfid.uid));
+  if (status != MFRC522::STATUS_OK) return false;
+  
+  status = rfid.MIFARE_Read(SECURE_BLOCK, buffer, &size);
+  if (status != MFRC522::STATUS_OK) return false;
+  
+  for (byte i = 0; i < 16; i++) {
+    if (buffer[i] != secretData[i]) return false;
+  }
+  return true;
+}
+
+bool resetSecureBlock() { 
+  MFRC522::StatusCode status;
+
+  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, 7, &rfidKey, &(rfid.uid));
+  if (status != MFRC522::STATUS_OK) return false;
+
+  byte factoryTrailer[16] = {
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0x07, 0x80, 0x69,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+  };
+
+  status = rfid.MIFARE_Write(7, factoryTrailer, 16);
+  if (status != MFRC522::STATUS_OK) return false;
+
+  MFRC522::MIFARE_Key defaultKey;
+  for (byte i = 0; i < 6; i++) defaultKey.keyByte[i] = 0xFF;
+
+  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, SECURE_BLOCK, &defaultKey, &(rfid.uid));
+  if (status == MFRC522::STATUS_OK) {
+    byte emptyBlock[16] = {0}; 
+    rfid.MIFARE_Write(SECURE_BLOCK, emptyBlock, 16); 
+  }
+
+  return true;
+}
+
+// ==========================================
+// 9. NHÓM XỬ LÝ LÔ-GIC XÁC THỰC
+// ==========================================
+void processPassword() { 
+  bool passOk = (inputBuf == storedPassword);
+  if (passOk) {
+    wrongCount = 0;
+    wrongCardCount = 0;  
+    wrongFaceCount = 0; 
+    rfidLocked = false;  
+    faceLocked = false; 
+    
+    if (alarmActive) {
+      stopAlarm(); 
+    }
+    openDoor("", false);      
+  } else {
+    if (!alarmActive) { 
+      wrongCount++;
+      if (wrongCount >= 5) { 
+        startAlarm();
+        wrongCount = 0;
+      } else {
+        wrongNotify();
+      }
+    } else {
+      buzz(180, 200);
+    }
+  }
+  inputBuf = "";
+  if (!alarmActive) {
+    showMainPrompt(); 
+  } else {
+    lcd.setCursor(0, 2);
+    lcd.print("                    ");
+  }
+}
+
+void triggerFaceAuth() { 
+  wakeUpLcdIfNeeded();
+  leaveMainUI();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Authenticating...");
+  lcd.setCursor(0, 1);
+  lcd.print("Please wait...");
+  
+  buzz(100, 150); delay(100); buzz(100, 150);
+
+  sendMQTTLog("REQUEST_FACE_AUTH: HOLD"); 
+  
+  isWaitingFaceAuth = true;
+  faceAuthResult = 0;
+  faceAuthTimeout = millis() + 15000; 
+}
+
+void keypadEvent(KeypadEvent key) {   
+  lastActivity = millis();
+  wakeUpLcdIfNeeded();
+  
+  if (key == '#') {
+    switch (keypad.getState()) {
+      case HOLD:
+        isHoldingHash = true;
+        if (!alarmActive && !rfidLocked && !faceLocked) { 
+          triggerFaceAuth();
+        } 
+        else if (!alarmActive && (rfidLocked || faceLocked)) {
+          leaveMainUI();
+          lcd.clear();
+          lcd.setCursor(0,0);
+          lcd.print("FACE LOCKED!");
+          lcd.setCursor(0,1);
+          lcd.print("Use Card or Pass");
+          buzz(180, 200); delay(100); buzz(180, 200);
+          delay(1500);
+          showMainPrompt();
+        }
+        break;
+      case RELEASED:
+        if (!isHoldingHash && !isWaitingFaceAuth) {
+          processPassword(); 
+        }
+        isHoldingHash = false;
+        break;
+      case IDLE:
+      case PRESSED:
+        break;
+    }
+  }
+}
+
+// ==========================================
+// 10. NHÓM LÕI ARDUINO
+// ==========================================
 void setup() {
   Serial.begin(9600);
   delay(200);
@@ -753,7 +811,6 @@ void loop() {
     }
 
     if (alarmActive) {
-
       lcd.setCursor(0, 2);
       lcd.print("                    "); 
       lcd.setCursor(0, 2);
@@ -903,7 +960,6 @@ void loop() {
       rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
       
       if (inMem && isSecure) {
-        // THẺ HỢP LỆ
         wrongCardCount = 0; 
         wrongFaceCount = 0; 
         faceLocked = false; 
@@ -916,7 +972,6 @@ void loop() {
         if (inMem && !isSecure) {
           sendMQTTLog("CLONED_WARNING: USER_" + uidHex); 
         } else {
-          // THẺ CHƯA ĐĂNG KÝ
           sendMQTTLog("DENIED_UNKNOWN_CARD: " + uidHex); 
         }
         
