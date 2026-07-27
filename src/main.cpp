@@ -8,7 +8,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
-//cau hinh bien toan cu
+//cau hinh bien toan cuc
 const char* ssid = "Thang";         
 const char* password = "15112004";        
 const char* mqtt_server = "broker.emqx.io";    
@@ -31,10 +31,8 @@ byte rowPins[ROWS] = {27,14,12,13};
 byte colPins[COLS] = {32,33,25,26};
 Keypad keypad = Keypad( makeKeymap(keysArr), rowPins, colPins, ROWS, COLS );
 
-// LCD
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
-// RFID
 const int RFID_SS = 2;
 const int RFID_RST = 4;
 MFRC522 rfid(RFID_SS, RFID_RST);
@@ -44,7 +42,6 @@ byte secretData[16] = {'Q','U','A','N','G','T','H','A','N','G','_','S','E','C','
 const byte SECURE_BLOCK = 4;
 const byte ADMIN_UID[4] = {0xAC, 0x64, 0x91, 0x05};
 
-// Servo
 Servo doorServo;
 const int SERVO_PIN = 15;
 int SERVO_NEUTRAL = 1500; 
@@ -52,18 +49,15 @@ const int SERVO_OPEN = 1700;
 const int SERVO_CLOSE = 1310;
 const int SERVO_DELAY = 800;
 
-// Buzzer 
 const int BUZZ_PIN = 17;
 const int BUZZ_CH = 6;
 const int BUZZ_FREQ = 2000;
 const int BUZZ_RES = 8;
 
-// Preferences (Bộ nhớ Flash)
 Preferences prefs;
 const char *PREF_NS = "rfid_store";
 const int MAX_CARDS = 60;
 
-// Các biến trạng thái logic
 String inputBuf = "";
 String storedPassword;
 int wrongCount = 0;
@@ -82,59 +76,53 @@ bool isWaitingFaceAuth = false;
 int faceAuthResult = 0; 
 unsigned long faceAuthTimeout = 0;
 
-// ==========================================
-// 2. KHAI BÁO NGUYÊN MẪU HÀM (FORWARD DECLARATIONS)
-// Bắt buộc phải có để tránh lỗi "not declared in this scope"
-// ==========================================
-// Nhóm Tiện ích
-void buzz(int duty, unsigned long ms);
-String uidToHex(const MFRC522::Uid &u);
-bool isAdmin(const MFRC522::Uid &u);
-// Nhóm Quản lý bộ nhớ
-String loadPassword();
-void savePassword(const String &pw);
-int cardCount();
-String cardAt(int i);
-void setCard(int i, const String &uid);
-void setCount(int n);
-bool addCardToMem(const String &uidIn);
-bool removeCard(const String &uidIn);
-bool isAllowedInMem(const String &uidIn);
-// Nhóm Giao tiếp Mạng & MQTT
-void handleWiFiAndMQTT();
-void sendMQTTLog(String message);
-void mqttCallback(char* topic, byte* payload, unsigned int length);
-// Nhóm Trạng thái (Cửa & Báo động)
-void performDoorCycle();
-void openDoor(const String &who, bool admin = false);
-void wrongNotify();
-void startAlarm();
-void stopAlarm();
-// Nhóm Giao diện LCD
-void showMainPrompt();
-void leaveMainUI();
-void wakeUpLcdIfNeeded();
-void adminMenu();
-// Nhóm RFID & Bảo mật
-int waitForCardOrCancel(String &outUid, unsigned long timeoutMs = 15000);
-bool writeSecureBlock();
-bool verifySecureBlock();
-bool resetSecureBlock();
-// Nhóm Xác thực
-void processPassword();
-void triggerFaceAuth();
-void keypadEvent(KeypadEvent key);
+//khai bao ham
+void buzz(int duty, unsigned long ms); //ham bat coi
+String uidToHex(const MFRC522::Uid &u);//chuyen uid thanh dang thap luc phan
+bool isAdmin(const MFRC522::Uid &u);//kiem tra xem phai the admin k
 
-// ==========================================
-// 3. NHÓM TIỆN ÍCH CƠ BẢN (UTILITY)
-// ==========================================
-void buzz(int duty, unsigned long ms) { 
+String loadPassword();//doc mat khau voi tham so la pw
+void savePassword(const String &pw);//luu pass moi
+int cardCount();//dem so luong the dang co
+String cardAt(int i);//truy xuat uid cua the 
+void setCard(int i, const String &uid);//ghi the moi vao cuoi danh sach vi tri thu i
+void setCount(int n);//cap nhat lai so luong the moi lan them the moi
+bool addCardToMem(const String &uidIn);//add the vao bo nho
+bool removeCard(const String &uidIn);//xoa the ra khoi bo nho
+bool isAllowedInMem(const String &uidIn);//kiem tra the co trong bo nho chua
+
+void handleWiFiAndMQTT();//lien tuc kiem tra trang thai wifi va mqtt
+void sendMQTTLog(String message);//gui message len topic
+void mqttCallback(char* topic, byte* payload, unsigned int length);//lang nghe mqtt tu server de xu ly
+
+void performDoorCycle();//man hinh hien thi khi dong/mo cua
+void openDoor(const String &who, bool admin = false);//hien thi loi chao khi co the quet
+void wrongNotify();//man hinh hien thi khi the quet sai
+void startAlarm();//bat co alarmActive = true de ham loop thay va bat coi
+void stopAlarm();//bat co alarmActive = false de ham loop thay va tat coi
+
+void showMainPrompt();//xoa sach man hinh va in giao dien mac dinh
+void leaveMainUI();//roi khoi main menu, giup man hinh k bi hien trang thai wifi
+void wakeUpLcdIfNeeded();//danh thuc lcd
+void adminMenu();//truy cap vao menu admin
+
+int waitForCardOrCancel(String &outUid, unsigned long timeoutMs = 15000); //cho 15s xem co the quet hay k
+bool writeSecureBlock();//Thuc hien ghi khoa bao mat tu dinh nghia (myCustomKey) vao block 7 và ghi chuoi du lieu bi mat (secretData) vao Block 4
+bool verifySecureBlock();//kiem tra xem trong block 4 co ghi secreData chua
+bool resetSecureBlock(); //reset lai data trong block 7 va 4 khi xoa the
+
+void processPassword(); //kiem tra mat khau
+void triggerFaceAuth();//gui mqtt yeu cau backend nhan dien khuon mat
+void keypadEvent(KeypadEvent key);//kiem tra phim #, neu he thong dang bi khoa thi se khong the truy cap chuc nang nhan dien khuon mat
+
+//cac ham tien ich
+void buzz(int duty, unsigned long ms) { //ham bat coi
   ledcWrite(BUZZ_CH, duty);
   delay(ms);
   ledcWrite(BUZZ_CH, 0);
 }
 
-String uidToHex(const MFRC522::Uid &u) { 
+String uidToHex(const MFRC522::Uid &u) { //chuyen uid thanh dang thap luc phan
   String s = "";
   for (byte i=0;i<u.size;i++){
     if (u.uidByte[i] < 0x10) s += "0";
@@ -144,32 +132,30 @@ String uidToHex(const MFRC522::Uid &u) {
   return s;
 }
 
-bool isAdmin(const MFRC522::Uid &u) { 
+bool isAdmin(const MFRC522::Uid &u) { //kiem tra xem phai the admin k
   if (u.size != 4) return false;
   for (byte i=0;i<4;i++) if (u.uidByte[i] != ADMIN_UID[i]) return false;
   return true;
 }
 
-// ==========================================
-// 4. NHÓM QUẢN LÝ BỘ NHỚ (PREFERENCES)
-// ==========================================
-String loadPassword() {
+//cac ham lien quan toi bo nho
+String loadPassword() { //doc mat khau voi tham so la pw
   String pw = prefs.getString("pw", "");
   if (pw == "") { pw = "1234"; prefs.putString("pw", pw); }
   return pw;
 }
 
-void savePassword(const String &pw){ prefs.putString("pw", pw); } 
+void savePassword(const String &pw){ prefs.putString("pw", pw); } //luu pass moi
 
-int cardCount(){ return prefs.getInt("n", 0); } 
+int cardCount(){ return prefs.getInt("n", 0); } //dem so luong the dang co
 
-String cardAt(int i){ return prefs.getString(("uid"+String(i)).c_str(), ""); } 
+String cardAt(int i){ return prefs.getString(("uid"+String(i)).c_str(), ""); } //truy xuat uid cua the 
 
-void setCard(int i, const String &uid){ prefs.putString(("uid"+String(i)).c_str(), uid); }
+void setCard(int i, const String &uid){ prefs.putString(("uid"+String(i)).c_str(), uid); } //ghi the moi vao cuoi danh sach vi tri thu i
 
-void setCount(int n){ prefs.putInt("n", n); } 
+void setCount(int n){ prefs.putInt("n", n); } //cap nhat lai so luong the moi lan them the moi
 
-bool addCardToMem(const String &uidIn){ 
+bool addCardToMem(const String &uidIn){  //add the vao bo nho
   String uid = uidIn; uid.toUpperCase();
   int n = cardCount();
   for (int i=0; i<n; i++) if (cardAt(i) == uid) return false;
@@ -177,7 +163,7 @@ bool addCardToMem(const String &uidIn){
   setCard(n, uid); setCount(n+1); return true;
 }
 
-bool removeCard(const String &uidIn){ 
+bool removeCard(const String &uidIn){ //xoa the ra khoi bo nho
   String uid = uidIn; uid.toUpperCase();
   int n = cardCount();
   int found = -1;
@@ -189,17 +175,15 @@ bool removeCard(const String &uidIn){
   return true;
 }
 
-bool isAllowedInMem(const String &uidIn){ 
+bool isAllowedInMem(const String &uidIn){ //kiem tra the co trong bo nho chua
   String uid = uidIn; uid.toUpperCase();
   int n = cardCount();
   for (int i=0; i<n; i++) if (cardAt(i) == uid) return true;
   return false;
 }
 
-// ==========================================
-// 5. NHÓM GIAO TIẾP MẠNG & MQTT
-// ==========================================
-void handleWiFiAndMQTT() { 
+//wifi va mqtt
+void handleWiFiAndMQTT() {  //lien tuc kiem tra trang thai wifi va mqtt
   bool isConnected = (WiFi.status() == WL_CONNECTED);
   
   if (isConnected != currentWiFiState) {
@@ -239,13 +223,13 @@ void handleWiFiAndMQTT() {
   }
 }
 
-void sendMQTTLog(String message) { 
+void sendMQTTLog(String message) { //gui message len topic
   if (mqttClient.connected()) {
     mqttClient.publish(mqtt_topic_log, message.c_str());
   }
 }
 
-void mqttCallback(char* topic, byte* payload, unsigned int length) { 
+void mqttCallback(char* topic, byte* payload, unsigned int length) { //lang nghe mqtt tu server de xu ly
   String message = "";
   for (int i = 0; i < length; i++) {
     message += (char)payload[i];
@@ -280,9 +264,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
-// ==========================================
-// 6. NHÓM ĐIỀU KHIỂN TRẠNG THÁI (CỬA & BÁO ĐỘNG)
-// ==========================================
+
 void performDoorCycle() { 
   wakeUpLcdIfNeeded();
   leaveMainUI();
@@ -360,9 +342,6 @@ void stopAlarm() {
   lastActivity = millis(); 
 }
 
-// ==========================================
-// 7. NHÓM GIAO DIỆN LCD (UI)
-// ==========================================
 void showMainPrompt() { 
   showingMain = true;
   lcd.clear();
@@ -551,9 +530,6 @@ void adminMenu() {
   lcd.clear(); lcd.setCursor(0,0); lcd.print("Exit admin"); delay(600); showMainPrompt(); return;
 }
 
-// ==========================================
-// 8. NHÓM XỬ LÝ RFID & BẢO MẬT SECTOR
-// ==========================================
 int waitForCardOrCancel(String &outUid, unsigned long timeoutMs) { 
   unsigned long t0 = millis();
   while (millis() - t0 < timeoutMs) {
@@ -662,9 +638,6 @@ bool resetSecureBlock() {
   return true;
 }
 
-// ==========================================
-// 9. NHÓM XỬ LÝ LÔ-GIC XÁC THỰC
-// ==========================================
 void processPassword() { 
   bool passOk = (inputBuf == storedPassword);
   if (passOk) {
@@ -754,9 +727,7 @@ void keypadEvent(KeypadEvent key) {
   }
 }
 
-// ==========================================
-// 10. NHÓM LÕI ARDUINO
-// ==========================================
+
 void setup() {
   Serial.begin(9600);
   delay(200);
