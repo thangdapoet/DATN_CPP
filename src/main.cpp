@@ -54,6 +54,8 @@ const int BUZZ_CH = 6;
 const int BUZZ_FREQ = 2000;
 const int BUZZ_RES = 8;
 
+const int MC38_PIN = 5; //mc38: 5 còi: 17
+
 Preferences prefs;
 const char *PREF_NS = "rfid_store";
 const int MAX_CARDS = 60;
@@ -269,20 +271,37 @@ void performDoorCycle() {
   wakeUpLcdIfNeeded();
   leaveMainUI();
   lcd.clear();
-  lcd.setCursor(0,0);
-  lcd.print("Opening door...");
   doorServo.writeMicroseconds(SERVO_OPEN);
   delay(SERVO_DELAY);
   doorServo.writeMicroseconds(SERVO_NEUTRAL);
   
-  for (int i = 5; i > 0; i--) {
-    lcd.setCursor(0, 1);
-    lcd.print("Close in: ");
-    lcd.print(i);
-    lcd.print("s  ");
-    delay(1000);
+  unsigned long startTime = millis();
+  bool hasOpened = false; // Cờ theo dõi xem cửa đã được mở ra vật lý chưa
+
+  // Chờ tối đa 15 giây
+  while (millis() - startTime < 15000UL) {
+    handleWiFiAndMQTT(); // Giữ kết nối mạng không bị ngắt quãng
+
+    int doorState = digitalRead(MC38_PIN); // Đọc MC-38: LOW = Đóng, HIGH = Mở
+
+    if (doorState == HIGH && !hasOpened) {
+      hasOpened = true; 
+      lcd.setCursor(0, 0);
+      lcd.print("Door is OPEN       ");
+    } else if (!hasOpened) {
+      lcd.setCursor(0, 0);
+      lcd.print("Door UNLOCKED      ");
+    }
+
+    // Nếu phát hiện cửa đã từng mở ra, và bây giờ vừa khép lại (LOW) -> Khóa ngay!
+    if (hasOpened && doorState == LOW) {
+      break; 
+    }
+
+    delay(50);
   }
 
+  // Khối lệnh này sẽ chạy khi: Cửa vừa đóng lại, HOẶC đã quá thời gian 15s
   lcd.clear();
   lcd.setCursor(0,0);
   lcd.print("Closing door...");
@@ -338,7 +357,7 @@ void startAlarm() {
 void stopAlarm() { 
   alarmActive = false; 
   alarmLcdPrinted = false;
-  ledcWrite(BUZZ_CH, 0); 
+  //ledcWrite(BUZZ_CH, 0); 
   lastActivity = millis(); 
 }
 
@@ -731,6 +750,7 @@ void keypadEvent(KeypadEvent key) {
 void setup() {
   Serial.begin(9600);
   delay(200);
+  pinMode(MC38_PIN, INPUT_PULLUP);
 
   WiFi.mode(WIFI_STA);
   mqttClient.setServer(mqtt_server, mqtt_port);
