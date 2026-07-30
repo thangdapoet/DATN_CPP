@@ -8,6 +8,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <Adafruit_NeoPixel.h>
 //cau hinh bien toan cuc
 const char* ssid = "Thang";         
 const char* password = "15112004";        
@@ -42,13 +43,23 @@ byte secretData[16] = {'Q','U','A','N','G','T','H','A','N','G','_','S','E','C','
 const byte SECURE_BLOCK = 4;
 const byte ADMIN_UID[4] = {0xAC, 0x64, 0x91, 0x05};
 
+
+#define TOUCH_PIN     13   // Đổi chân tùy ý
+#define LED_PIN       17   // Đổi chân tùy ý
+#define NUM_LEDS      3
+
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+// Biến cho LED chớp Non-blocking
+unsigned long lastLedTime = 0;
+bool isRedOn = false;
+int chaseStep = 0;
+
 Servo doorServo;
 const int SERVO_PIN = 15;
 int SERVO_NEUTRAL = 1500; 
 const int SERVO_OPEN = 1700;
 const int SERVO_CLOSE = 1310;
 const int SERVO_DELAY = 800;
-
 
 const int BUZZ_PIN = 17;
 const int BUZZ_CH = 6;
@@ -80,6 +91,28 @@ int faceAuthResult = 0;
 unsigned long faceAuthTimeout = 0;
 
 //khai bao ham
+void setAllLeds(int r, int g, int b) {
+  for(int i = 0; i < NUM_LEDS; i++) strip.setPixelColor(i, strip.Color(r, g, b));
+  strip.show(); 
+}
+
+void blinkLeds(int r, int g, int b, int times) {
+  for (int i = 0; i < times; i++) {
+    setAllLeds(r, g, b); delay(500);
+    setAllLeds(0, 0, 0); delay(200);
+  }
+}
+void handleLedChase() {
+  if (millis() - lastLedTime > 200) {
+    lastLedTime = millis();
+    strip.clear();
+    strip.setPixelColor(chaseStep, strip.Color(255, 255, 0)); // Sáng đuổi màu vàng (bạn có thể đổi màu)
+    strip.show();
+    chaseStep++;
+    if (chaseStep >= NUM_LEDS) chaseStep = 0;
+  }
+}
+
 void buzz(int duty, unsigned long ms); //ham bat coi
 String uidToHex(const MFRC522::Uid &u);//chuyen uid thanh dang thap luc phan
 bool isAdmin(const MFRC522::Uid &u);//kiem tra xem phai the admin k
@@ -120,9 +153,9 @@ void keypadEvent(KeypadEvent key);//kiem tra phim #, neu he thong dang bi khoa t
 
 //cac ham tien ich
 void buzz(int duty, unsigned long ms) { //ham bat coi
-  ledcWrite(BUZZ_CH, duty);
+  // ledcWrite(BUZZ_CH, duty);
   delay(ms);
-  ledcWrite(BUZZ_CH, 0);
+  // ledcWrite(BUZZ_CH, 0);
 }
 
 String uidToHex(const MFRC522::Uid &u) { //chuyen uid thanh dang thap luc phan
@@ -277,30 +310,38 @@ void performDoorCycle() {
   doorServo.writeMicroseconds(SERVO_NEUTRAL);
   
   unsigned long startTime = millis();
+   lcd.setCursor(0, 0);
+    lcd.print("Door UNLOCKED      ");
   bool hasOpened = false; // Cờ theo dõi xem cửa đã được mở ra vật lý chưa
 
   // Chờ tối đa 15 giây
-  while (millis() - startTime < 15000UL) {
+  while (millis() - startTime < 5000UL) {
     handleWiFiAndMQTT(); // Giữ kết nối mạng không bị ngắt quãng
-
-    int doorState = digitalRead(MC38_PIN); // Đọc MC-38: LOW = Đóng, HIGH = Mở
-
-    if (doorState == HIGH && !hasOpened) {
-      hasOpened = true; 
-      lcd.setCursor(0, 0);
-      lcd.print("Door is OPEN       ");
-    } else if (!hasOpened) {
-      lcd.setCursor(0, 0);
-      lcd.print("Door UNLOCKED      ");
-    }
-
-    // Nếu phát hiện cửa đã từng mở ra, và bây giờ vừa khép lại (LOW) -> Khóa ngay!
-    if (hasOpened && doorState == LOW) {
-      break; 
-    }
-
-    delay(50);
+    handleLedChase();
+   
+    delay(10);
+   
   }
+   setAllLeds(255, 255, 0);
+    // int doorState = digitalRead(MC38_PIN); // Đọc MC-38: LOW = Đóng, HIGH = Mở
+
+    // if (doorState == HIGH && !hasOpened) {
+    //   handleLedChase();
+    //   hasOpened = true; 
+    //   lcd.setCursor(0, 0);
+    //   lcd.print("Door is OPEN       ");
+    // } else if (!hasOpened) {
+    //   lcd.setCursor(0, 0);
+    //   lcd.print("Door UNLOCKED      ");
+    // }
+
+    // // Nếu phát hiện cửa đã từng mở ra, và bây giờ vừa khép lại (LOW) -> Khóa ngay!
+    // if (hasOpened && doorState == LOW) {
+    //   break; 
+    // }
+   
+    
+  
 
   // Khối lệnh này sẽ chạy khi: Cửa vừa đóng lại, HOẶC đã quá thời gian 15s
   lcd.clear();
@@ -322,6 +363,7 @@ void openDoor(const String &who, bool admin) {
   
   if (admin) { 
     lcd.print("Welcome THANG HUYNH"); 
+    setAllLeds(0, 255, 0);
     buzz(200,200); 
     delay(1000);
   } else { 
@@ -330,6 +372,7 @@ void openDoor(const String &who, bool admin) {
       lcd.setCursor(0,1);
       lcd.print(who); 
     }
+    setAllLeds(0, 255, 0); delay(1000);
     buzz(120,150); 
     delay(1000); 
     performDoorCycle();
@@ -341,8 +384,10 @@ void wrongNotify() {
   leaveMainUI();
   lcd.clear();
   lcd.setCursor(0,0);
-  lcd.print("LOCK!!");
-  buzz(180,200); delay(150); buzz(180,200); delay(400);
+  lcd.print("LOCK !!");
+  setAllLeds(255, 0, 0);
+  buzz(180,200); delay(150); buzz(180,200); delay(400); 
+  setAllLeds(255, 255, 0);
   
   lastActivity = millis(); 
   showMainPrompt();
@@ -394,6 +439,7 @@ void wakeUpLcdIfNeeded() {
 }
 
 void adminMenu() { 
+  setAllLeds(0, 255, 0);
   wakeUpLcdIfNeeded();
   leaveMainUI();
   lcd.clear();
@@ -415,7 +461,7 @@ void adminMenu() {
     
     if (k == 'C' || k == 'c' || k == 'D') {
       lcd.clear(); lcd.setCursor(0,0); lcd.print("Exit Admin");
-      delay(300); showMainPrompt(); return;
+      delay(300); showMainPrompt(); setAllLeds(255, 255, 0); return;
     }
     
     if (k == '1') {
@@ -435,18 +481,18 @@ void adminMenu() {
           
           if (kk == 'C' || kk == 'c' || kk == 'D') {
             lcd.clear(); lcd.setCursor(0,0); lcd.print("Canceled"); 
-            delay(600); showMainPrompt(); return;
+            delay(600); showMainPrompt(); setAllLeds(255, 255, 0); return;
           }
           
           if (kk == '#') { 
             if (newPw.length() > 0) {
               savePassword(newPw); storedPassword = newPw;
               sendMQTTLog("ADMIN_CHANGED_PASSWORD");
-              lcd.clear(); lcd.setCursor(0,0); lcd.print("SAVED PWD!");
+              lcd.clear(); lcd.setCursor(0,0); lcd.print("SAVED PWD!");blinkLeds(0, 255, 0, 2);
               buzz(160,150); delay(800); showMainPrompt(); return;
             } else {
-              lcd.clear(); lcd.setCursor(0,0); lcd.print("Pass empty!"); 
-              delay(800); showMainPrompt(); return;
+              lcd.clear(); lcd.setCursor(0,0); lcd.print("Pass empty!");  blinkLeds(255, 0, 0, 2);
+              delay(800); showMainPrompt(); setAllLeds(255, 255, 0); return;
             }
           } else if (kk == '*') { 
             if (newPw.length()) newPw.remove(newPw.length()-1);
@@ -460,7 +506,7 @@ void adminMenu() {
         }
         delay(30);
       }
-      lcd.clear(); lcd.setCursor(0,0); lcd.print("Timeout! Cancel"); delay(800); showMainPrompt(); return;
+      lcd.clear(); lcd.setCursor(0,0); lcd.print("Timeout! Cancel"); delay(800); showMainPrompt(); setAllLeds(255, 255, 0); return;
     }
     
     if (k == '2') {
@@ -473,25 +519,41 @@ void adminMenu() {
       
       if (status == 1) { 
         uid.toUpperCase();
+
+        // 1. KIỂM TRA XEM THẺ CÓ TRONG BỘ NHỚ KHÔNG TRƯỚC TIÊN
+        if (!isAllowedInMem(uid)) {
+          lcd.clear(); 
+          lcd.setCursor(0,0); 
+          lcd.print("Not found"); 
+          blinkLeds(255, 0, 0, 1); 
+          setAllLeds(255, 0, 0);
+          buzz(60,200);
+          
+          rfid.PICC_HaltA(); rfid.PCD_StopCrypto1(); 
+          delay(900); showMainPrompt(); setAllLeds(255, 255, 0); return;
+        }
+
+        // 2. NẾU CÓ TRONG BỘ NHỚ THÌ MỚI TIẾN HÀNH RESET KEY VÀ XÓA
         if (resetSecureBlock()) {
           if (removeCard(uid)) {
             sendMQTTLog("ADMIN_DELETED_CARD: " + uid);
-            lcd.clear(); lcd.setCursor(0,0); lcd.print("DELETED"); buzz(160,120);
-          } else {
-            lcd.clear(); lcd.setCursor(0,0); lcd.print("Not found"); buzz(60,200);
+            lcd.clear(); lcd.setCursor(0,0); lcd.print("DELETED"); blinkLeds(0, 255, 0, 2); setAllLeds (0,255,0); buzz(160,120);
           }
         } else {
           lcd.clear(); lcd.setCursor(0,0); lcd.print("Reset Key Loi!");
           lcd.setCursor(0,1); lcd.print("The khong khop Key"); buzz(60,200);
+          blinkLeds(255, 0, 0, 1); 
+          setAllLeds(255, 0, 0);
         }
+        
         rfid.PICC_HaltA(); rfid.PCD_StopCrypto1(); 
-        delay(900); showMainPrompt(); return;
+        delay(900); showMainPrompt(); setAllLeds(255, 255, 0); return;
       } 
       else if (status == -1) { 
-        lcd.clear(); lcd.setCursor(0,0); lcd.print("Canceled"); delay(600); showMainPrompt(); return;
+        lcd.clear(); lcd.setCursor(0,0); lcd.print("Canceled"); delay(600); showMainPrompt(); setAllLeds(255, 255, 0); return;
       } 
       else { 
-        lcd.clear(); lcd.setCursor(0,0); lcd.print("No card"); delay(700); showMainPrompt(); return;
+        lcd.clear(); lcd.setCursor(0,0); lcd.print("No card"); delay(700); showMainPrompt(); setAllLeds(255, 255, 0);  return;
       }
     }
     
@@ -508,10 +570,10 @@ void adminMenu() {
 
         if (isAllowedInMem(uid)) {
           lcd.clear();
-          lcd.setCursor(0,0); lcd.print("Already exists"); 
+          lcd.setCursor(0,0); lcd.print("Already exists");  blinkLeds(255, 0, 0, 1); setAllLeds(255, 0, 0); 
           buzz(60,200);
           rfid.PICC_HaltA(); rfid.PCD_StopCrypto1(); 
-          delay(1500); showMainPrompt(); return;
+          delay(1500); setAllLeds(255, 255, 0); showMainPrompt(); ; return;
         }
 
         if (writeSecureBlock()) {
@@ -527,7 +589,7 @@ void adminMenu() {
             }
             
             sendMQTTLog("ADMIN_ADDED_CARD: " + uid);
-            lcd.clear(); lcd.setCursor(0, 0);  lcd.print("Added:");  lcd.setCursor(0, 1); lcd.print(uid); 
+            lcd.clear(); lcd.setCursor(0, 0);   lcd.print("Added:");   lcd.setCursor(0, 1); lcd.print(uid); blinkLeds(0, 255, 0, 2); setAllLeds (0,255,0);
           } else { 
             lcd.clear(); lcd.setCursor(0, 0);  lcd.print("Exists/Full"); 
             buzz(60, 200); 
@@ -537,17 +599,17 @@ void adminMenu() {
           lcd.setCursor(0,1); lcd.print("The da duoc khoa"); buzz(60,200);
         }
         rfid.PICC_HaltA(); rfid.PCD_StopCrypto1(); 
-        delay(900); showMainPrompt(); return;
+        delay(900); showMainPrompt();  setAllLeds(255, 255, 0); return;
       } 
       else if (status == -1) { 
-        lcd.clear(); lcd.setCursor(0,0); lcd.print("Canceled"); delay(600); showMainPrompt(); return;
+        lcd.clear(); lcd.setCursor(0,0); lcd.print("Canceled"); delay(600); showMainPrompt();setAllLeds(255, 255, 0); return;
       } 
       else { 
-        lcd.clear(); lcd.setCursor(0,0); lcd.print("No card"); delay(700); showMainPrompt(); return;
+        lcd.clear(); lcd.setCursor(0,0); lcd.print("No card"); delay(700); showMainPrompt();setAllLeds(255, 255, 0); return;
       }
     }
   }
-  lcd.clear(); lcd.setCursor(0,0); lcd.print("Exit admin"); delay(600); showMainPrompt(); return;
+  lcd.clear(); lcd.setCursor(0,0); lcd.print("Exit admin"); delay(600); showMainPrompt(); setAllLeds(255, 255, 0); return;
 }
 
 int waitForCardOrCancel(String &outUid, unsigned long timeoutMs) { 
@@ -726,7 +788,7 @@ void keypadEvent(KeypadEvent key) {
           leaveMainUI();
           lcd.clear();
           lcd.setCursor(0,0);
-          lcd.print("FACE LOCKED!");
+          lcd.print("FACE LOCKED!");blinkLeds(255, 0, 0, 3);
           lcd.setCursor(0,1);
           lcd.print("Use Card or Pass");
           buzz(180, 200); delay(100); buzz(180, 200);
@@ -751,7 +813,11 @@ void keypadEvent(KeypadEvent key) {
 void setup() {
   Serial.begin(9600);
   delay(200);
-  pinMode(MC38_PIN, INPUT_PULLUP);
+  // pinMode(MC38_PIN, INPUT_PULLUP);
+  // pinMode(TOUCH_PIN, INPUT_PULLDOWN);
+  strip.begin();
+  strip.setBrightness(50); 
+  setAllLeds(255, 255, 0);
 
   WiFi.mode(WIFI_STA);
   mqttClient.setServer(mqtt_server, mqtt_port);
@@ -765,9 +831,9 @@ void setup() {
   lcd.backlight();
   lcd.clear();
 
-  ledcSetup(BUZZ_CH, BUZZ_FREQ, BUZZ_RES);
-  ledcAttachPin(BUZZ_PIN, BUZZ_CH);
-  ledcWrite(BUZZ_CH, 0);
+  // ledcSetup(BUZZ_CH, BUZZ_FREQ, BUZZ_RES);
+  // ledcAttachPin(BUZZ_PIN, BUZZ_CH);
+  // ledcWrite(BUZZ_CH, 0);
 
   doorServo.attach(SERVO_PIN, 500, 2400);
   doorServo.writeMicroseconds(SERVO_NEUTRAL);
@@ -791,6 +857,14 @@ void setup() {
 
 void loop() {
   handleWiFiAndMQTT();
+  // if (digitalRead(TOUCH_PIN) == HIGH) {
+  //   setAllLeds(0, 255, 0); // Xanh lá 1.5s
+  //   delay(1500);
+  //   // Gọi hàm openDoor để thực hiện logic LCD, còi, Servo y hệt quét thẻ đúng
+  //   openDoor("INSIDE", false); 
+  //   if (!alarmActive) setAllLeds(255, 255, 0); // Về lại vàng
+  //   while(digitalRead(TOUCH_PIN) == HIGH) delay(50); // Chống dội
+  // }
   char k = keypad.getKey(); 
   if (k) {
     lastActivity = millis(); 
@@ -816,6 +890,11 @@ void loop() {
 
   if (alarmActive) {
     wakeUpLcdIfNeeded(); 
+    if (millis() - lastLedTime > 150) {
+      lastLedTime = millis();
+      isRedOn = !isRedOn;
+      if (isRedOn) setAllLeds(255, 0, 0); else setAllLeds(0, 0, 0);
+    }
 
     if (!alarmLcdPrinted) {
       leaveMainUI();
@@ -828,9 +907,9 @@ void loop() {
     }
     unsigned long r = millis() % 2000;
     if (r < 300) {
-      ledcWrite(BUZZ_CH, 255); 
+      // ledcWrite(BUZZ_CH, 255); 
     } else {
-      ledcWrite(BUZZ_CH, 0);   
+      // ledcWrite(BUZZ_CH, 0);   
     }
 
     if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
@@ -838,12 +917,13 @@ void loop() {
         if (verifySecureBlock()) { 
           stopAlarm(); 
           rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
-          
+          setAllLeds(0, 255, 0); // Admin tắt báo động: Xanh lá 1.5s
           lcd.clear();
           lcd.setCursor(0, 0);
           lcd.print("Alarm stopped");
           buzz(160, 120); 
           delay(1500);
+          setAllLeds(255, 255, 0); // Về lại vàng
           
           wrongCount = 0; 
           inputBuf = "";
@@ -860,7 +940,7 @@ void loop() {
   }
   if (isWaitingFaceAuth) {
     wakeUpLcdIfNeeded(); 
-    
+    handleLedChase();
     if (faceAuthResult == 1) {
       isWaitingFaceAuth = false;
       wrongFaceCount = 0; 
@@ -878,6 +958,7 @@ void loop() {
         lcd.clear(); lcd.setCursor(0,0); lcd.print("TOO MANY FAILES");
         lcd.setCursor(0,1); lcd.print("FACE IS LOCKED!");
         buzz(180, 500); delay(2000);
+        setAllLeds(255, 255, 0);
         showMainPrompt();
       } else {
         wrongNotify();
@@ -890,6 +971,7 @@ void loop() {
       lcd.print("AI Timeout!");
       buzz(100, 500);
       delay(2000);
+      setAllLeds(255, 255, 0);
       showMainPrompt();
     }
     return; 
@@ -920,14 +1002,17 @@ void loop() {
         if (wrongCardCount >= 5) {
           rfidLocked = true;
           sendMQTTLog("RFID_LOCKED");
-          lcd.clear(); lcd.setCursor(0,0); lcd.print("CARDS LOCKED!");
+          lcd.clear(); lcd.setCursor(0,0); lcd.print("CARDS LOCKED!"); blinkLeds(255, 0, 0, 2);
           lcd.setCursor(0,1); lcd.print("Enter Password");
           buzz(180, 500); delay(2000);
           showMainPrompt();
         } else {
           lcd.clear(); lcd.setCursor(0,0); lcd.print("SECURITY ALERT!");
           lcd.setCursor(0,1); lcd.print("Fake Admin Card!");
+          blinkLeds(255, 0, 0, 2); 
+          setAllLeds(255, 0, 0);
           buzz(180, 500); delay(2000);
+          setAllLeds(255, 255, 0);
           showMainPrompt();
         }
       }
@@ -937,8 +1022,10 @@ void loop() {
         rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
         lcd.clear(); lcd.setCursor(0,0); lcd.print("CARDS LOCKED!");
         lcd.setCursor(0,1); lcd.print("Enter Password");
+        setAllLeds(255,0,0);
         buzz(180, 200); delay(100); buzz(180, 200);
         delay(1500);
+        setAllLeds(255, 255, 0);
         showMainPrompt();
         return; 
       }
@@ -972,13 +1059,16 @@ void loop() {
           sendMQTTLog("RFID_LOCKED");
           lcd.clear(); lcd.setCursor(0,0); lcd.print("CARDS LOCKED!");
           lcd.setCursor(0,1); lcd.print("Enter Password");
-          buzz(180, 500); delay(2000);
+          buzz(180, 500); blinkLeds(255, 0, 0, 2); setAllLeds (255,0,0); delay(2000);
           showMainPrompt();
         } else {
           if (inMem && !isSecure) {
              lcd.clear(); lcd.setCursor(0,0); lcd.print("SECURITY ALERT!");
              lcd.setCursor(0,1); lcd.print("Fake Card");
+             blinkLeds(255, 0, 0, 2); // 
+             setAllLeds(255, 0, 0);
              buzz(180, 500); delay(2000);
+             setAllLeds(255, 255, 0);
              showMainPrompt();
           } else {
              wrongNotify(); 
