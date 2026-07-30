@@ -49,6 +49,7 @@ const int SERVO_OPEN = 1700;
 const int SERVO_CLOSE = 1310;
 const int SERVO_DELAY = 800;
 
+
 const int BUZZ_PIN = 17;
 const int BUZZ_CH = 6;
 const int BUZZ_FREQ = 2000;
