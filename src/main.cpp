@@ -44,8 +44,8 @@ const byte SECURE_BLOCK = 4;
 const byte ADMIN_UID[4] = {0xAC, 0x64, 0x91, 0x05};
 
 
-#define TOUCH_PIN     13   // Đổi chân tùy ý
-#define LED_PIN       17   // Đổi chân tùy ý
+#define TOUCH_PIN     13   // gốc: servo 15, còi 17
+#define LED_PIN       15   // 
 #define NUM_LEDS      3
 
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -55,7 +55,7 @@ bool isRedOn = false;
 int chaseStep = 0;
 
 Servo doorServo;
-const int SERVO_PIN = 15;
+const int SERVO_PIN = 16;
 int SERVO_NEUTRAL = 1500; 
 const int SERVO_OPEN = 1700;
 const int SERVO_CLOSE = 1310;
@@ -100,6 +100,20 @@ void blinkLeds(int r, int g, int b, int times) {
   for (int i = 0; i < times; i++) {
     setAllLeds(r, g, b); delay(500);
     setAllLeds(0, 0, 0); delay(200);
+  }
+}
+
+void blinkAndBuzz(int r, int g, int b, int times, int buzzDuty = 180, unsigned long onTime = 200, unsigned long offTime = 150) {
+  for (int i = 0; i < times; i++) {
+    // 1. Bật LED và Còi ngay lập tức
+    setAllLeds(r, g, b);
+    ledcWrite(BUZZ_CH, buzzDuty); 
+    delay(onTime); // Giữ trạng thái BẬT
+
+    // 2. Tắt LED và Còi ngay lập tức
+    setAllLeds(0, 0, 0);
+    ledcWrite(BUZZ_CH, 0);
+    delay(offTime); // Giữ trạng thái TẮT
   }
 }
 void handleLedChase() {
@@ -153,9 +167,9 @@ void keypadEvent(KeypadEvent key);//kiem tra phim #, neu he thong dang bi khoa t
 
 //cac ham tien ich
 void buzz(int duty, unsigned long ms) { //ham bat coi
-  // ledcWrite(BUZZ_CH, duty);
+  ledcWrite(BUZZ_CH, duty);
   delay(ms);
-  // ledcWrite(BUZZ_CH, 0);
+  ledcWrite(BUZZ_CH, 0);
 }
 
 String uidToHex(const MFRC522::Uid &u) { //chuyen uid thanh dang thap luc phan
@@ -372,7 +386,7 @@ void openDoor(const String &who, bool admin) {
       lcd.setCursor(0,1);
       lcd.print(who); 
     }
-    setAllLeds(0, 255, 0); delay(1000);
+    setAllLeds(0, 255, 0);
     buzz(120,150); 
     delay(1000); 
     performDoorCycle();
@@ -385,10 +399,8 @@ void wrongNotify() {
   lcd.clear();
   lcd.setCursor(0,0);
   lcd.print("LOCK !!");
-  setAllLeds(255, 0, 0);
-  buzz(180,200); delay(150); buzz(180,200); delay(400); 
+  blinkAndBuzz(255, 0, 0, 2, 180, 200, 150);
   setAllLeds(255, 255, 0);
-  
   lastActivity = millis(); 
   showMainPrompt();
 }
@@ -488,10 +500,10 @@ void adminMenu() {
             if (newPw.length() > 0) {
               savePassword(newPw); storedPassword = newPw;
               sendMQTTLog("ADMIN_CHANGED_PASSWORD");
-              lcd.clear(); lcd.setCursor(0,0); lcd.print("SAVED PWD!");blinkLeds(0, 255, 0, 2);
-              buzz(160,150); delay(800); showMainPrompt(); return;
+              lcd.clear(); lcd.setCursor(0,0); lcd.print("SAVED PWD!");setAllLeds(0,255,0);buzz(180,200);
+               delay(800); setAllLeds(255, 255, 0); showMainPrompt(); return;
             } else {
-              lcd.clear(); lcd.setCursor(0,0); lcd.print("Pass empty!");  blinkLeds(255, 0, 0, 2);
+              lcd.clear(); lcd.setCursor(0,0); lcd.print("Pass empty!");  blinkAndBuzz(255, 0, 0, 2, 180, 200, 150);
               delay(800); showMainPrompt(); setAllLeds(255, 255, 0); return;
             }
           } else if (kk == '*') { 
@@ -525,19 +537,17 @@ void adminMenu() {
           lcd.clear(); 
           lcd.setCursor(0,0); 
           lcd.print("Not found"); 
-          blinkLeds(255, 0, 0, 1); 
-          setAllLeds(255, 0, 0);
-          buzz(60,200);
-          
+         blinkAndBuzz(255, 0, 0, 2, 180, 200, 150);
+        
           rfid.PICC_HaltA(); rfid.PCD_StopCrypto1(); 
-          delay(900); showMainPrompt(); setAllLeds(255, 255, 0); return;
+          delay(900); showMainPrompt(); setAllLeds(255, 255, 0);return;
         }
 
         // 2. NẾU CÓ TRONG BỘ NHỚ THÌ MỚI TIẾN HÀNH RESET KEY VÀ XÓA
         if (resetSecureBlock()) {
           if (removeCard(uid)) {
             sendMQTTLog("ADMIN_DELETED_CARD: " + uid);
-            lcd.clear(); lcd.setCursor(0,0); lcd.print("DELETED"); blinkLeds(0, 255, 0, 2); setAllLeds (0,255,0); buzz(160,120);
+            lcd.clear(); lcd.setCursor(0,0); lcd.print("DELETED"); blinkAndBuzz(0, 255, 0, 1, 160, 120, 150); setAllLeds (0,255,0);
           }
         } else {
           lcd.clear(); lcd.setCursor(0,0); lcd.print("Reset Key Loi!");
@@ -570,10 +580,9 @@ void adminMenu() {
 
         if (isAllowedInMem(uid)) {
           lcd.clear();
-          lcd.setCursor(0,0); lcd.print("Already exists");  blinkLeds(255, 0, 0, 1); setAllLeds(255, 0, 0); 
-          buzz(60,200);
+          lcd.setCursor(0,0); lcd.print("Already exists");  blinkAndBuzz(255, 0, 0, 2, 180, 200, 150);  setAllLeds(255, 255, 0);
           rfid.PICC_HaltA(); rfid.PCD_StopCrypto1(); 
-          delay(1500); setAllLeds(255, 255, 0); showMainPrompt(); ; return;
+          delay(1500);  showMainPrompt(); ; return;
         }
 
         if (writeSecureBlock()) {
@@ -589,7 +598,7 @@ void adminMenu() {
             }
             
             sendMQTTLog("ADMIN_ADDED_CARD: " + uid);
-            lcd.clear(); lcd.setCursor(0, 0);   lcd.print("Added:");   lcd.setCursor(0, 1); lcd.print(uid); blinkLeds(0, 255, 0, 2); setAllLeds (0,255,0);
+            lcd.clear(); lcd.setCursor(0, 0);   lcd.print("Added:");   lcd.setCursor(0, 1); lcd.print(uid); blinkAndBuzz(0, 255, 0, 1, 160, 120, 150); setAllLeds (0,255,0);
           } else { 
             lcd.clear(); lcd.setCursor(0, 0);  lcd.print("Exists/Full"); 
             buzz(60, 200); 
@@ -721,6 +730,7 @@ bool resetSecureBlock() {
 }
 
 void processPassword() { 
+  if (inputBuf.length() == 0) return;
   bool passOk = (inputBuf == storedPassword);
   if (passOk) {
     wrongCount = 0;
@@ -831,9 +841,9 @@ void setup() {
   lcd.backlight();
   lcd.clear();
 
-  // ledcSetup(BUZZ_CH, BUZZ_FREQ, BUZZ_RES);
-  // ledcAttachPin(BUZZ_PIN, BUZZ_CH);
-  // ledcWrite(BUZZ_CH, 0);
+  ledcSetup(BUZZ_CH, BUZZ_FREQ, BUZZ_RES);
+  ledcAttachPin(BUZZ_PIN, BUZZ_CH);
+  ledcWrite(BUZZ_CH, 0);
 
   doorServo.attach(SERVO_PIN, 500, 2400);
   doorServo.writeMicroseconds(SERVO_NEUTRAL);
@@ -907,9 +917,9 @@ void loop() {
     }
     unsigned long r = millis() % 2000;
     if (r < 300) {
-      // ledcWrite(BUZZ_CH, 255); 
+      ledcWrite(BUZZ_CH, 255); 
     } else {
-      // ledcWrite(BUZZ_CH, 0);   
+      ledcWrite(BUZZ_CH, 0);   
     }
 
     if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
@@ -1002,15 +1012,17 @@ void loop() {
         if (wrongCardCount >= 5) {
           rfidLocked = true;
           sendMQTTLog("RFID_LOCKED");
-          lcd.clear(); lcd.setCursor(0,0); lcd.print("CARDS LOCKED!"); blinkLeds(255, 0, 0, 2);
+          lcd.clear(); lcd.setCursor(0,0); lcd.print("CARDS LOCKED!"); 
           lcd.setCursor(0,1); lcd.print("Enter Password");
-          buzz(180, 500); delay(2000);
+          setAllLeds(255,0,0);
+          buzz(180, 500);
+          delay(2000);
+          setAllLeds(255,255,0);
           showMainPrompt();
         } else {
+          setAllLeds(255,0,0);
           lcd.clear(); lcd.setCursor(0,0); lcd.print("SECURITY ALERT!");
           lcd.setCursor(0,1); lcd.print("Fake Admin Card!");
-          blinkLeds(255, 0, 0, 2); 
-          setAllLeds(255, 0, 0);
           buzz(180, 500); delay(2000);
           setAllLeds(255, 255, 0);
           showMainPrompt();
@@ -1059,15 +1071,18 @@ void loop() {
           sendMQTTLog("RFID_LOCKED");
           lcd.clear(); lcd.setCursor(0,0); lcd.print("CARDS LOCKED!");
           lcd.setCursor(0,1); lcd.print("Enter Password");
-          buzz(180, 500); blinkLeds(255, 0, 0, 2); setAllLeds (255,0,0); delay(2000);
+          setAllLeds(255,0,0);
+          buzz(180,500);
+          delay(2000);
+          setAllLeds(255,255,0);
           showMainPrompt();
         } else {
           if (inMem && !isSecure) {
+            setAllLeds(255,0,0);
              lcd.clear(); lcd.setCursor(0,0); lcd.print("SECURITY ALERT!");
              lcd.setCursor(0,1); lcd.print("Fake Card");
-             blinkLeds(255, 0, 0, 2); // 
-             setAllLeds(255, 0, 0);
-             buzz(180, 500); delay(2000);
+             buzz(180, 500);
+             delay(2000);
              setAllLeds(255, 255, 0);
              showMainPrompt();
           } else {
