@@ -998,9 +998,14 @@ void loop() {
     if (isAdmin(rfid.uid)) {
       if (verifySecureBlock()) {
         rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
+
         rfidLocked = false; 
         wrongCardCount = 0;  
         wrongCount = 0;
+
+        faceLocked = false;     
+        wrongFaceCount = 0;
+        
         sendMQTTLog("GRANTED_ADMIN: " + uidHex); 
         openDoor("", true);                      
         adminMenu();
