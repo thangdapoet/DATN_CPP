@@ -871,7 +871,7 @@ void loop() {
   handleWiFiAndMQTT();
   if (digitalRead(TOUCH_PIN) == HIGH) {
     if (alarmActive) stopAlarm();
-  // Gọi hàm openDoor để thực hiện logic LCD, còi, Servo y hệt quét thẻ đúng
+// Gọi hàm openDoor để thực hiện logic LCD, còi, Servo y hệt quét thẻ đúng
     openDoor("", false); 
     if (!alarmActive) setAllLeds(255, 255, 0); // Về lại vàng
     while(digitalRead(TOUCH_PIN) == HIGH) delay(50); // Chống dội
