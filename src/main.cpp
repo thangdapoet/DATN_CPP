@@ -44,8 +44,8 @@ const byte SECURE_BLOCK = 4;
 const byte ADMIN_UID[4] = {0xAC, 0x64, 0x91, 0x05};
 
 
-#define TOUCH_PIN     13   // gốc: servo 15, còi 17
-#define LED_PIN       15   // 
+#define TOUCH_PIN     5  // gốc: servo 15, còi 17
+#define LED_PIN       16  // 
 #define NUM_LEDS      3
 
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -55,7 +55,7 @@ bool isRedOn = false;
 int chaseStep = 0;
 
 Servo doorServo;
-const int SERVO_PIN = 16;
+const int SERVO_PIN = 15;
 int SERVO_NEUTRAL = 1500; 
 const int SERVO_OPEN = 1700;
 const int SERVO_CLOSE = 1310;
@@ -324,39 +324,41 @@ void performDoorCycle() {
   doorServo.writeMicroseconds(SERVO_NEUTRAL);
   
   unsigned long startTime = millis();
-   lcd.setCursor(0, 0);
-    lcd.print("Door UNLOCKED      ");
+  lcd.setCursor(0, 0);
+  lcd.print("Door UNLOCKED      ");
   bool hasOpened = false; // Cờ theo dõi xem cửa đã được mở ra vật lý chưa
 
-  // Chờ tối đa 15 giây
-  while (millis() - startTime < 5000UL) {
+  // Chờ tối đa 15 giây (Đã trả lại 15000UL)
+  while (millis() - startTime < 15000UL) {
     handleWiFiAndMQTT(); // Giữ kết nối mạng không bị ngắt quãng
-    handleLedChase();
+    
+    int doorState = digitalRead(MC38_PIN); // Đọc MC-38: LOW = Đóng, HIGH = Mở
+
+    if (doorState == HIGH && !hasOpened) {
+      hasOpened = true; 
+      lcd.setCursor(0, 0);
+      lcd.print("Door is OPEN       ");
+    } else if (!hasOpened) {
+      lcd.setCursor(0, 0);
+      lcd.print("Door UNLOCKED      ");
+    }
+
+    // Logic LED: Chỉ chạy hiệu ứng đuổi khi cửa đang hở ra
+    if (doorState == HIGH) {
+      handleLedChase();
+    }
+
+    // Nếu phát hiện cửa đã từng mở ra, và bây giờ vừa khép lại (LOW) -> Khóa ngay!
+    if (hasOpened && doorState == LOW) {
+      break; 
+    }
    
     delay(10);
-   
   }
-   setAllLeds(255, 255, 0);
-    // int doorState = digitalRead(MC38_PIN); // Đọc MC-38: LOW = Đóng, HIGH = Mở
-
-    // if (doorState == HIGH && !hasOpened) {
-    //   handleLedChase();
-    //   hasOpened = true; 
-    //   lcd.setCursor(0, 0);
-    //   lcd.print("Door is OPEN       ");
-    // } else if (!hasOpened) {
-    //   lcd.setCursor(0, 0);
-    //   lcd.print("Door UNLOCKED      ");
-    // }
-
-    // // Nếu phát hiện cửa đã từng mở ra, và bây giờ vừa khép lại (LOW) -> Khóa ngay!
-    // if (hasOpened && doorState == LOW) {
-    //   break; 
-    // }
-   
-    
   
-
+  // Trả về màu vàng ngay khi vòng lặp kết thúc (cửa đóng)
+  setAllLeds(255, 255, 0);
+  
   // Khối lệnh này sẽ chạy khi: Cửa vừa đóng lại, HOẶC đã quá thời gian 15s
   lcd.clear();
   lcd.setCursor(0,0);
@@ -479,7 +481,7 @@ void adminMenu() {
     if (k == '1') {
       lcd.clear(); lcd.setCursor(0,0); lcd.print("CHANGE PASS");
       lcd.setCursor(0,1); lcd.print("New pass:");
-      lcd.setCursor(0,3); lcd.print("*:Del C:Exit #:Ent");
+      lcd.setCursor(0,3); lcd.print("*:Del #:Ent C:Exit");
       
       String newPw = "";
       unsigned long t0 = millis();
@@ -503,8 +505,8 @@ void adminMenu() {
               lcd.clear(); lcd.setCursor(0,0); lcd.print("SAVED PWD!");setAllLeds(0,255,0);buzz(180,200);
                delay(800); setAllLeds(255, 255, 0); showMainPrompt(); return;
             } else {
-              lcd.clear(); lcd.setCursor(0,0); lcd.print("Pass empty!");  blinkAndBuzz(255, 0, 0, 2, 180, 200, 150);
-              delay(800); showMainPrompt(); setAllLeds(255, 255, 0); return;
+              lcd.clear(); lcd.setCursor(0,0); lcd.print("Pass empty!");  blinkAndBuzz(255, 0, 0, 2, 180, 200, 150); setAllLeds(255, 255, 0);
+              delay(800); showMainPrompt(); return;
             }
           } else if (kk == '*') { 
             if (newPw.length()) newPw.remove(newPw.length()-1);
@@ -538,9 +540,9 @@ void adminMenu() {
           lcd.setCursor(0,0); 
           lcd.print("Not found"); 
          blinkAndBuzz(255, 0, 0, 2, 180, 200, 150);
-        
+        setAllLeds(255, 255, 0);
           rfid.PICC_HaltA(); rfid.PCD_StopCrypto1(); 
-          delay(900); showMainPrompt(); setAllLeds(255, 255, 0);return;
+          delay(900); showMainPrompt(); return;
         }
 
         // 2. NẾU CÓ TRONG BỘ NHỚ THÌ MỚI TIẾN HÀNH RESET KEY VÀ XÓA
@@ -823,8 +825,8 @@ void keypadEvent(KeypadEvent key) {
 void setup() {
   Serial.begin(9600);
   delay(200);
-  // pinMode(MC38_PIN, INPUT_PULLUP);
-  // pinMode(TOUCH_PIN, INPUT_PULLDOWN);
+  pinMode(MC38_PIN, INPUT_PULLUP);
+  pinMode(TOUCH_PIN, INPUT_PULLDOWN);
   strip.begin();
   strip.setBrightness(50); 
   setAllLeds(255, 255, 0);
@@ -867,14 +869,15 @@ void setup() {
 
 void loop() {
   handleWiFiAndMQTT();
-  // if (digitalRead(TOUCH_PIN) == HIGH) {
-  //   setAllLeds(0, 255, 0); // Xanh lá 1.5s
-  //   delay(1500);
-  //   // Gọi hàm openDoor để thực hiện logic LCD, còi, Servo y hệt quét thẻ đúng
-  //   openDoor("INSIDE", false); 
-  //   if (!alarmActive) setAllLeds(255, 255, 0); // Về lại vàng
-  //   while(digitalRead(TOUCH_PIN) == HIGH) delay(50); // Chống dội
-  // }
+  if (digitalRead(TOUCH_PIN) == HIGH) {
+    if (alarmActive) stopAlarm();
+    setAllLeds(0, 255, 0); // Xanh lá 1.5s
+    delay(1500);
+    // Gọi hàm openDoor để thực hiện logic LCD, còi, Servo y hệt quét thẻ đúng
+    openDoor("", false); 
+    if (!alarmActive) setAllLeds(255, 255, 0); // Về lại vàng
+    while(digitalRead(TOUCH_PIN) == HIGH) delay(50); // Chống dội
+  }
   char k = keypad.getKey(); 
   if (k) {
     lastActivity = millis(); 
