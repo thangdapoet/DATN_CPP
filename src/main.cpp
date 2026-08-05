@@ -28,8 +28,8 @@ char keysArr[ROWS][COLS] = {
   {'1','2','3','A'}, {'4','5','6','B'},
   {'7','8','9','C'}, {'*','0','#','D'}
 };
-byte rowPins[ROWS] = {27,14,12,13};
-byte colPins[COLS] = {32,33,25,26};
+byte rowPins[ROWS] = {27,14,12,13}; //13 12 14 27
+byte colPins[COLS] = {32,33,25,26}; //26 25 33 32
 Keypad keypad = Keypad( makeKeymap(keysArr), rowPins, colPins, ROWS, COLS );
 
 LiquidCrystal_I2C lcd(0x27, 20, 4);
@@ -44,7 +44,7 @@ const byte SECURE_BLOCK = 4;
 const byte ADMIN_UID[4] = {0xAC, 0x64, 0x91, 0x05};
 
 
-#define TOUCH_PIN     5  // gốc: servo 15, còi 17
+#define TOUCH_PIN     34  // gốc: servo 15, còi 17
 #define LED_PIN       16  // 
 #define NUM_LEDS      3
 
