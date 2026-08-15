@@ -23,6 +23,9 @@ unsigned long lastReconnectAttempt = 0;
 bool currentWiFiState = false; 
 unsigned long lastWiFiAttempt = 0;
 
+unsigned long bootTime = 0; 
+bool isTouchReady = false;
+
 const byte ROWS = 4, COLS = 4;
 char keysArr[ROWS][COLS] = {
   {'1','2','3','A'}, {'4','5','6','B'},
@@ -89,6 +92,8 @@ bool isHoldingHash = false;
 bool isWaitingFaceAuth = false;
 int faceAuthResult = 0; 
 unsigned long faceAuthTimeout = 0;
+
+bool lastTouchState = LOW;
 
 //khai bao ham
 void setAllLeds(int r, int g, int b) {
@@ -314,52 +319,83 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) { //lang nghe
   }
 }
 
-
 void performDoorCycle() { 
   wakeUpLcdIfNeeded();
   leaveMainUI();
   lcd.clear();
+  
   doorServo.writeMicroseconds(SERVO_OPEN);
   delay(SERVO_DELAY);
   doorServo.writeMicroseconds(SERVO_NEUTRAL);
   
   unsigned long startTime = millis();
   lcd.setCursor(0, 0);
-  lcd.print("Door UNLOCKED      ");
-  bool hasOpened = false; // Cờ theo dõi xem cửa đã được mở ra vật lý chưa
+  lcd.print("Opening door     ");
 
-  // Chờ tối đa 15 giây (Đã trả lại 15000UL)
-  while (millis() - startTime < 15000UL) {
-    handleWiFiAndMQTT(); // Giữ kết nối mạng không bị ngắt quãng
+  int VAL_NEAR = LOW;  // Nam châm gần (Cửa ĐÓNG) -> Đọc LOW
+  int VAL_FAR  = HIGH; // Nam châm tách (Cửa MỞ) -> Đọc HIGH
+
+  int step = 0; 
+  delay(1000); // Tránh nhiễu rung lắc và EMI lúc giật Servo
+
+  int lastRawState = digitalRead(MC38_PIN);
+  unsigned long lastDebounceTime = millis();
+  int stableState = lastRawState;
+
+  while (true) {
+    handleWiFiAndMQTT(); 
     
-    int doorState = digitalRead(MC38_PIN); // Đọc MC-38: LOW = Đóng, HIGH = Mở
-
-    if (doorState == HIGH && !hasOpened) {
-      hasOpened = true; 
-      lcd.setCursor(0, 0);
-      lcd.print("Door is OPEN       ");
-    } else if (!hasOpened) {
-      lcd.setCursor(0, 0);
-      lcd.print("Door UNLOCKED      ");
+    // --- Lọc nhiễu 300ms ---
+    int rawState = digitalRead(MC38_PIN);
+    if (rawState != lastRawState) {
+      lastDebounceTime = millis(); 
+      lastRawState = rawState;
     }
-
-    // Logic LED: Chỉ chạy hiệu ứng đuổi khi cửa đang hở ra
-    if (doorState == HIGH) {
-      handleLedChase();
+    if ((millis() - lastDebounceTime) > 300) {
+      stableState = rawState;
     }
+    // -----------------------
 
-    // Nếu phát hiện cửa đã từng mở ra, và bây giờ vừa khép lại (LOW) -> Khóa ngay!
-    if (hasOpened && doorState == LOW) {
-      break; 
+    if (step == 0) { // ĐANG CHỜ TÁCH NAM CHÂM RA
+      if (stableState == VAL_FAR) { 
+        step = 1; 
+        lcd.setCursor(0, 0);
+        lcd.print("Door is opened       ");
+        startTime = millis(); 
+      } 
+      else if (millis() - startTime > 15000UL) { 
+        lcd.setCursor(0, 0);
+        lcd.print("Timeout! Auto Lock ");
+        delay(1500);
+        break; 
+      }
     }
-   
-    delay(10);
+    else if (step == 1) { // ĐÃ TÁCH, CHỜ GHÉP NAM CHÂM LẠI
+      handleLedChase(); 
+      
+      if (stableState == VAL_NEAR) { 
+        lcd.setCursor(0, 0);
+        lcd.print("Door is closed    ");
+        delay(2000); // Chờ 2s cho khít hẳn
+        break; 
+      } 
+      else if (millis() - startTime > 15000UL) { 
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Please close door!");
+        blinkAndBuzz(255, 255, 0, 3, 200, 300, 200); 
+        
+        startTime = millis(); 
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Door is OPEN       ");
+      }
+    }
+    delay(20); 
   }
   
-  // Trả về màu vàng ngay khi vòng lặp kết thúc (cửa đóng)
   setAllLeds(255, 255, 0);
   
-  // Khối lệnh này sẽ chạy khi: Cửa vừa đóng lại, HOẶC đã quá thời gian 15s
   lcd.clear();
   lcd.setCursor(0,0);
   lcd.print("Closing door...");
@@ -692,16 +728,30 @@ bool verifySecureBlock() {
   byte buffer[18];
   byte size = sizeof(buffer);
   
-  status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, SECURE_BLOCK, &rfidKey, &(rfid.uid));
-  if (status != MFRC522::STATUS_OK) return false;
-  
-  status = rfid.MIFARE_Read(SECURE_BLOCK, buffer, &size);
-  if (status != MFRC522::STATUS_OK) return false;
-  
-  for (byte i = 0; i < 16; i++) {
-    if (buffer[i] != secretData[i]) return false;
+  // Cho phép thử xác thực tối đa 3 lần để chống nhiễu sóng RF
+  for (int attempt = 0; attempt < 3; attempt++) {
+    status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, SECURE_BLOCK, &rfidKey, &(rfid.uid));
+    
+    if (status == MFRC522::STATUS_OK) {
+      status = rfid.MIFARE_Read(SECURE_BLOCK, buffer, &size);
+      if (status == MFRC522::STATUS_OK) {
+        bool match = true;
+        for (byte i = 0; i < 16; i++) {
+          if (buffer[i] != secretData[i]) {
+            match = false;
+            break;
+          }
+        }
+        if (match) return true; // Đọc thành công và khớp dữ liệu
+      }
+    }
+    
+    // Nếu lỗi, bắt buộc phải dừng Crypto để khởi động lại trạng thái bảo mật
+    rfid.PCD_StopCrypto1(); 
+    delay(20); // Dừng 20ms cho sóng từ trường ổn định lại trước khi thử lại
   }
-  return true;
+  
+  return false; // Thử 3 lần đều thất bại thì mới chốt là Fake Card
 }
 
 bool resetSecureBlock() { 
@@ -853,6 +903,7 @@ void setup() {
 
   SPI.begin(18, 19, 23, RFID_SS);
   rfid.PCD_Init();
+  rfid.PCD_SetAntennaGain(rfid.RxGain_max);
   delay(100);
 
   for (byte i = 0; i < 6; i++) rfidKey.keyByte[i] = myCustomKey[i];
@@ -865,17 +916,34 @@ void setup() {
   showMainPrompt();
   
   lastActivity = millis(); 
+  bootTime = millis();
 }
 
 void loop() {
   handleWiFiAndMQTT();
-  if (digitalRead(TOUCH_PIN) == HIGH) {
-    if (alarmActive) stopAlarm();
-// Gọi hàm openDoor để thực hiện logic LCD, còi, Servo y hệt quét thẻ đúng
-    openDoor("", false); 
-    if (!alarmActive) setAllLeds(255, 255, 0); // Về lại vàng
-    while(digitalRead(TOUCH_PIN) == HIGH) delay(50); // Chống dội
+  // --- LOGIC CHỐNG MỞ CỬA LÚC KHỞI ĐỘNG ---
+  if (!isTouchReady) {
+    // Chỉ kích hoạt nút nhấn khi đã qua 2.5s VÀ cảm biến đã trở về trạng thái LOW ổn định
+    if ((millis() - bootTime > 2500) && digitalRead(TOUCH_PIN) == LOW) {
+      isTouchReady = true; 
+    }
+  } 
+  else { // Khi nút nhấn đã sẵn sàng
+    if (digitalRead(TOUCH_PIN) == HIGH) {
+      if (alarmActive) stopAlarm();
+      
+      openDoor("", false); 
+      if (!alarmActive) setAllLeds(255, 255, 0); 
+      
+      // Vòng lặp chống dội: chờ người dùng rút tay ra
+      // (Có thêm handleWiFiAndMQTT để không bị rớt mạng nếu lỡ giữ tay quá lâu)
+      while(digitalRead(TOUCH_PIN) == HIGH) {
+        handleWiFiAndMQTT(); 
+        delay(50); 
+      }
+    }
   }
+  // ----------------------------------------
   char k = keypad.getKey(); 
   if (k) {
     lastActivity = millis(); 
