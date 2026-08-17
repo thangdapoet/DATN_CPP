@@ -52,7 +52,6 @@ const byte ADMIN_UID[4] = {0xAC, 0x64, 0x91, 0x05};
 #define NUM_LEDS      3
 
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
-// Biến cho LED chớp Non-blocking
 unsigned long lastLedTime = 0;
 bool isRedOn = false;
 int chaseStep = 0;
@@ -93,7 +92,12 @@ bool isWaitingFaceAuth = false;
 int faceAuthResult = 0; 
 unsigned long faceAuthTimeout = 0;
 
-bool lastTouchState = LOW;
+//OTP
+String otpCode = "";
+unsigned long otpStartTime = 0;
+bool isOtpActive = false;
+const unsigned long OTP_TIMEOUT = 600000UL; //
+
 
 //khai bao ham
 void setAllLeds(int r, int g, int b) {
@@ -110,15 +114,13 @@ void blinkLeds(int r, int g, int b, int times) {
 
 void blinkAndBuzz(int r, int g, int b, int times, int buzzDuty = 180, unsigned long onTime = 200, unsigned long offTime = 150) {
   for (int i = 0; i < times; i++) {
-    // 1. Bật LED và Còi ngay lập tức
     setAllLeds(r, g, b);
     ledcWrite(BUZZ_CH, buzzDuty); 
-    delay(onTime); // Giữ trạng thái BẬT
+    delay(onTime);
 
-    // 2. Tắt LED và Còi ngay lập tức
     setAllLeds(0, 0, 0);
     ledcWrite(BUZZ_CH, 0);
-    delay(offTime); // Giữ trạng thái TẮT
+    delay(offTime); 
   }
 }
 void handleLedChase() {
@@ -304,17 +306,22 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) { //lang nghe
       faceAuthResult = -1;
     }
     else if (message == "WEB_UNLOCK") {
-      Serial.println("Nhận lệnh mở cửa từ Web!");
       openDoor("", false); 
     }
     else if (message == "WEB_STOP_ALARM") {
       if (alarmActive) {
-        Serial.println("Nhận lệnh tắt báo động từ Web!");
         stopAlarm(); 
-        lcd.clear(); lcd.setCursor(0, 0); lcd.print("Web Stopped!");
+        lcd.clear(); lcd.setCursor(0, 0); lcd.print("Alarm Stopped");
         buzz(160, 120); delay(1500);
         wrongCount = 0; inputBuf = ""; showMainPrompt(); 
       }
+    }
+    else if (message.startsWith("WEB_SET_OTP: ")) {
+      otpCode = message.substring(13);
+      otpCode.trim();
+      isOtpActive = true;
+      otpStartTime = millis();
+      Serial.println("Da nhan OTP moi: " + otpCode);
     }
   }
 }
@@ -332,11 +339,11 @@ void performDoorCycle() {
   lcd.setCursor(0, 0);
   lcd.print("Opening door     ");
 
-  int VAL_NEAR = LOW;  // Nam châm gần (Cửa ĐÓNG) -> Đọc LOW
-  int VAL_FAR  = HIGH; // Nam châm tách (Cửa MỞ) -> Đọc HIGH
+  int VAL_NEAR = LOW; 
+  int VAL_FAR  = HIGH;
 
   int step = 0; 
-  delay(1000); // Tránh nhiễu rung lắc và EMI lúc giật Servo
+  delay(1000); 
 
   int lastRawState = digitalRead(MC38_PIN);
   unsigned long lastDebounceTime = millis();
@@ -382,13 +389,13 @@ void performDoorCycle() {
       else if (millis() - startTime > 15000UL) { 
         lcd.clear();
         lcd.setCursor(0, 0);
-        lcd.print("Please close door!");
+        lcd.print("Please close door");
         blinkAndBuzz(255, 255, 0, 3, 200, 300, 200); 
         
         startTime = millis(); 
         lcd.clear();
         lcd.setCursor(0, 0);
-        lcd.print("Door is OPEN       ");
+        lcd.print("Door is opened       ");
       }
     }
     delay(20); 
@@ -403,6 +410,9 @@ void performDoorCycle() {
   delay(SERVO_DELAY);
   doorServo.writeMicroseconds(SERVO_NEUTRAL);
   
+  rfid.PCD_Init();
+  rfid.PCD_SetAntennaGain(rfid.RxGain_max);
+
   lastActivity = millis(); 
   showMainPrompt();
 }
@@ -570,7 +580,6 @@ void adminMenu() {
       if (status == 1) { 
         uid.toUpperCase();
 
-        // 1. KIỂM TRA XEM THẺ CÓ TRONG BỘ NHỚ KHÔNG TRƯỚC TIÊN
         if (!isAllowedInMem(uid)) {
           lcd.clear(); 
           lcd.setCursor(0,0); 
@@ -581,7 +590,6 @@ void adminMenu() {
           delay(900); showMainPrompt(); return;
         }
 
-        // 2. NẾU CÓ TRONG BỘ NHỚ THÌ MỚI TIẾN HÀNH RESET KEY VÀ XÓA
         if (resetSecureBlock()) {
           if (removeCard(uid)) {
             sendMQTTLog("ADMIN_DELETED_CARD: " + uid);
@@ -632,6 +640,11 @@ void adminMenu() {
             for (int i = 3; i > 0; i--) {
               lcd.setCursor(0, 1); 
               lcd.print("Capturing in "); lcd.print(i); lcd.print("s ");
+              strip.clear();
+              for(int j = 0; j < i; j++) {
+                strip.setPixelColor(j, strip.Color(255, 255, 0)); 
+              }
+              strip.show();
               delay(1000);     
             }
             
@@ -728,8 +741,7 @@ bool verifySecureBlock() {
   byte buffer[18];
   byte size = sizeof(buffer);
   
-  // Cho phép thử xác thực tối đa 3 lần để chống nhiễu sóng RF
-  for (int attempt = 0; attempt < 3; attempt++) {
+  for (int attempt = 0; attempt < 5; attempt++) {
     status = rfid.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, SECURE_BLOCK, &rfidKey, &(rfid.uid));
     
     if (status == MFRC522::STATUS_OK) {
@@ -742,16 +754,15 @@ bool verifySecureBlock() {
             break;
           }
         }
-        if (match) return true; // Đọc thành công và khớp dữ liệu
+        if (match) return true; 
       }
     }
     
-    // Nếu lỗi, bắt buộc phải dừng Crypto để khởi động lại trạng thái bảo mật
     rfid.PCD_StopCrypto1(); 
-    delay(20); // Dừng 20ms cho sóng từ trường ổn định lại trước khi thử lại
+    delay(20); 
   }
   
-  return false; // Thử 3 lần đều thất bại thì mới chốt là Fake Card
+  return false; 
 }
 
 bool resetSecureBlock() { 
@@ -782,14 +793,24 @@ bool resetSecureBlock() {
 }
 
 void processPassword() { 
-  if (inputBuf.length() == 0) return;
+ if (inputBuf.length() == 0) return;
+  
   bool passOk = (inputBuf == storedPassword);
-  if (passOk) {
+  bool otpOk = (isOtpActive && inputBuf == otpCode);
+
+  if (passOk || otpOk) {
+    if (otpOk) {
+      isOtpActive = false;
+      otpCode = "";
+    } else {
+      sendMQTTLog("GRANTED: PASSWORD");
+    }
+
     wrongCount = 0;
     wrongCardCount = 0;  
     wrongFaceCount = 0; 
     rfidLocked = false;  
-    faceLocked = false; 
+    faceLocked = false;
     
     if (alarmActive) {
       stopAlarm(); 
@@ -871,12 +892,14 @@ void keypadEvent(KeypadEvent key) {
   }
 }
 
-
 void setup() {
   Serial.begin(9600);
   delay(200);
+
   pinMode(MC38_PIN, INPUT_PULLUP);
-  pinMode(TOUCH_PIN, INPUT_PULLDOWN);
+
+  pinMode(TOUCH_PIN, INPUT);
+
   strip.begin();
   strip.setBrightness(50); 
   setAllLeds(255, 255, 0);
@@ -921,25 +944,23 @@ void setup() {
 
 void loop() {
   handleWiFiAndMQTT();
-  // --- LOGIC CHỐNG MỞ CỬA LÚC KHỞI ĐỘNG ---
-  if (!isTouchReady) {
-    // Chỉ kích hoạt nút nhấn khi đã qua 2.5s VÀ cảm biến đã trở về trạng thái LOW ổn định
-    if ((millis() - bootTime > 2500) && digitalRead(TOUCH_PIN) == LOW) {
-      isTouchReady = true; 
-    }
-  } 
-  else { // Khi nút nhấn đã sẵn sàng
+  if (isOtpActive && (millis() - otpStartTime > OTP_TIMEOUT)) {
+    isOtpActive = false;
+    otpCode = "";
+  }
+  if (digitalRead(TOUCH_PIN) == HIGH) {
+    delay(50); 
     if (digitalRead(TOUCH_PIN) == HIGH) {
       if (alarmActive) stopAlarm();
       
       openDoor("", false); 
       if (!alarmActive) setAllLeds(255, 255, 0); 
-      
-      // Vòng lặp chống dội: chờ người dùng rút tay ra
-      // (Có thêm handleWiFiAndMQTT để không bị rớt mạng nếu lỡ giữ tay quá lâu)
+
+      unsigned long btnWait = millis();
       while(digitalRead(TOUCH_PIN) == HIGH) {
         handleWiFiAndMQTT(); 
         delay(50); 
+        if (millis() - btnWait > 3000) break;
       }
     }
   }
@@ -996,13 +1017,13 @@ void loop() {
         if (verifySecureBlock()) { 
           stopAlarm(); 
           rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
-          setAllLeds(0, 255, 0); // Admin tắt báo động: Xanh lá 1.5s
+          setAllLeds(0, 255, 0);
           lcd.clear();
           lcd.setCursor(0, 0);
           lcd.print("Alarm stopped");
           buzz(160, 120); 
           delay(1500);
-          setAllLeds(255, 255, 0); // Về lại vàng
+          setAllLeds(255, 255, 0); 
           
           wrongCount = 0; 
           inputBuf = "";
