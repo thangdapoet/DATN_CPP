@@ -321,7 +321,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) { //lang nghe
       otpCode.trim();
       isOtpActive = true;
       otpStartTime = millis();
-      Serial.println("Da nhan OTP moi: " + otpCode);
     }
   }
 }
