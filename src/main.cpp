@@ -10,9 +10,7 @@
 #include <PubSubClient.h>
 #include <Adafruit_NeoPixel.h>
 
-// ==========================================
-// 1. CẤU HÌNH & HẰNG SỐ (CONSTANTS & PINS)
-// ==========================================
+///cac hang so
 const char* ssid = "Thang";         
 const char* password = "15112004";        
 const char* mqtt_server = "broker.emqx.io";    
@@ -48,9 +46,7 @@ const int MAX_CARDS = 60;
 const unsigned long SLEEP_TIMEOUT = 15000UL; 
 const unsigned long OTP_TIMEOUT = 600000UL; 
 
-// ==========================================
-// 2. BIẾN TOÀN CỤC & ĐỐI TƯỢNG (GLOBALS)
-// ==========================================
+///cac bien toan cuc
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 unsigned long lastReconnectAttempt = 0;
@@ -104,9 +100,7 @@ String otpCode = "";
 unsigned long otpStartTime = 0;
 bool isOtpActive = false;
 
-// ==========================================
-// 3. KHAI BÁO HÀM (FORWARD DECLARATIONS)
-// ==========================================
+///khai bao cac ham
 void setAllLeds(int r, int g, int b);
 void blinkLeds(int r, int g, int b, int times);
 void blinkAndBuzz(int r, int g, int b, int times, int buzzDuty = 180, unsigned long onTime = 200, unsigned long offTime = 150);
@@ -149,9 +143,7 @@ void processPassword();
 void triggerFaceAuth();
 void keypadEvent(KeypadEvent key);
 
-// ==========================================
-// 4. CHƯƠNG TRÌNH CHÍNH (SETUP & LOOP)
-// ==========================================
+///setup loop
 void setup() {
   Serial.begin(9600);
   delay(200);
@@ -206,8 +198,7 @@ void loop() {
     isOtpActive = false;
     otpCode = "";
   }
-  
-  // --- LOGIC ĐỌC NÚT NHẤN CƠ ---
+
   if (digitalRead(TOUCH_PIN) == HIGH) {
     delay(50); 
     if (digitalRead(TOUCH_PIN) == HIGH) {
@@ -461,9 +452,7 @@ void loop() {
   delay(10);
 }
 
-// ==========================================
-// 5. CÁC HÀM TIỆN ÍCH & PHẦN CỨNG (UTILITIES)
-// ==========================================
+///cac ham tien ich
 void setAllLeds(int r, int g, int b) {
   for(int i = 0; i < NUM_LEDS; i++) strip.setPixelColor(i, strip.Color(r, g, b));
   strip.show(); 
@@ -553,9 +542,7 @@ void wakeUpLcdIfNeeded() {
   }
 }
 
-// ==========================================
-// 6. CÁC HÀM QUẢN LÝ BỘ NHỚ (PREFERENCES)
-// ==========================================
+/////////
 String loadPassword() { 
   String pw = prefs.getString("pw", "");
   if (pw == "") { pw = "1234"; prefs.putString("pw", pw); }
@@ -599,9 +586,7 @@ bool isAllowedInMem(const String &uidIn){
   return false;
 }
 
-// ==========================================
-// 7. CÁC HÀM MẠNG & MQTT (WIFI / MQTT)
-// ==========================================
+//////////
 void handleWiFiAndMQTT() {  
   bool isConnected = (WiFi.status() == WL_CONNECTED);
   
@@ -706,9 +691,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
-// ==========================================
-// 8. CÁC HÀM XỬ LÝ BLOCK BẢO MẬT RFID
-// ==========================================
+///////////
 bool writeSecureBlock() { 
   MFRC522::StatusCode status;
   MFRC522::MIFARE_Key defaultKey;
@@ -807,9 +790,7 @@ bool resetSecureBlock() {
   return true;
 }
 
-// ==========================================
-// 9. CÁC HÀM LOGIC HOẠT ĐỘNG (CORE LOGIC)
-// ==========================================
+////////////
 void performDoorCycle() { 
   isDoorOperating = true; 
 
@@ -847,8 +828,7 @@ void performDoorCycle() {
     if ((millis() - lastDebounceTime) > 300) {
       stableState = rawState;
     }
-    // -----------------------
-
+ 
     if (step == 0) { 
       if (stableState == VAL_FAR) { 
         step = 1; 
