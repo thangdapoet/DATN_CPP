@@ -658,11 +658,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
     else if (message == "WEB_STOP_ALARM") {
       if (alarmActive) {
-        Serial.println("Nhận lệnh tắt báo động từ Web!");
         stopAlarm(); 
+        setAllLeds(0, 255, 0);
         lcd.clear(); lcd.setCursor(0, 0); lcd.print("Web Stopped!");
         buzz(160, 120); delay(1500);
-        wrongCount = 0; inputBuf = ""; showMainPrompt(); 
+        wrongCount = 0; inputBuf = ""; showMainPrompt(); setAllLeds(255, 255, 0);
       }
     }
     else if (message.startsWith("WEB_SET_OTP: ")) {
